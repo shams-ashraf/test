@@ -10,22 +10,14 @@ import streamlit as st
 from sentence_transformers import SentenceTransformer
 import chromadb
 from chromadb.utils import embedding_functions
+import time
 
 # ------------------ Settings ------------------
 DOCUMENTS_FOLDER = "./documents"
 pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
+MIN_CHUNK_WORDS = 10  # Minimum words per chunk
 
-# ------------------ Session State Initialization ------------------
-if "chats" not in st.session_state:
-    st.session_state.chats = {}
-if "current_chat_id" not in st.session_state:
-    chat_id = str(uuid.uuid4())
-    st.session_state.chats[chat_id] = {"messages": [], "created_at": ""}
-    st.session_state.current_chat_id = chat_id
-if "page_reload" not in st.session_state:
-    st.session_state.page_reload = False
-
-# ------------------ Text Preprocessing ------------------
+# ------------------ Preprocessing Functions ------------------
 def clean_text(text):
     text = re.sub(r'\s+', ' ', text)
     text = '\n'.join([line.strip() for line in text.split('\n') if line.strip()])
@@ -36,12 +28,16 @@ def structure_text_into_paragraphs(text):
         return ""
     text = clean_text(text)
     lines = [line.strip() for line in text.split('\n') if line.strip()]
-    paragraphs, current_paragraph = [], []
+    paragraphs = []
+    current_paragraph = []
     for i, line in enumerate(lines):
         words_in_line = line.split()
         if len(words_in_line) < 3 and not (line[0].isupper() or re.match(r'^[\d]+[\.\):]', line)):
             continue
-        is_heading = (line.isupper() and len(words_in_line) <= 10) or (len(words_in_line) <= 6 and line[0].isupper() and line.endswith(':'))
+        is_heading = (
+            (line.isupper() and len(words_in_line) <= 10) or
+            (len(words_in_line) <= 6 and line[0].isupper() and line.endswith(':'))
+        )
         if is_heading:
             if current_paragraph:
                 paragraphs.append(' '.join(current_paragraph))
@@ -59,44 +55,39 @@ def structure_text_into_paragraphs(text):
         ends_with_punctuation = line.endswith(('.', '!', '?', '؟', '!', '。'))
         next_is_new_section = False
         if i < len(lines) - 1:
-            next_line = lines[i+1]
+            next_line = lines[i + 1]
             next_words = next_line.split()
-            next_is_new_section = re.match(r'^[\d]+[\.\)]\s', next_line) or re.match(r'^[•\-\*]\s', next_line) or (len(next_words) <= 6 and next_line[0].isupper()) or next_line.isupper()
-        if ends_with_punctuation or next_is_new_section or i == len(lines)-1:
+            next_is_new_section = (
+                re.match(r'^[\d]+[\.\)]\s', next_line) or
+                re.match(r'^[•\-\*]\s', next_line) or
+                (len(next_words) <= 6 and next_line[0].isupper()) or
+                next_line.isupper()
+            )
+        is_last_line = (i == len(lines) - 1)
+        if (ends_with_punctuation or next_is_new_section or is_last_line):
             if current_paragraph:
                 paragraphs.append(' '.join(current_paragraph))
                 current_paragraph = []
-    structured_text = ""
-    for para in paragraphs:
-        if para.startswith('\n🔹'):
-            structured_text += para
-        elif para.startswith('  '):
-            structured_text += para + "\n"
-        else:
-            structured_text += para + "\n\n"
-    return structured_text.strip() if structured_text else text
+    return '\n\n'.join(paragraphs) if paragraphs else text
 
 def extract_and_structure_text_from_image(image):
     raw_text = pytesseract.image_to_string(image, lang='eng+ara+deu')
     if not raw_text.strip():
         return ""
     structured_text = structure_text_into_paragraphs(raw_text)
-    if '|' in structured_text or '\t' in structured_text or re.search(r'\d+\s+\w+\s+\d+', structured_text):
-        structured_text = "📊 [Table content from image]\n\n" + structured_text
     return structured_text
 
 def create_smart_chunks(text, chunk_size=700, overlap=200):
     words = text.split()
     chunks = []
     if len(words) <= chunk_size:
-        return [text] if text.strip() else []
-    for i in range(0, len(words), chunk_size-overlap):
-        chunk = " ".join(words[i:i+chunk_size])
-        if len(chunk.split()) >= 30:
-            chunks.append(chunk)
+        return [text] if len(words) >= MIN_CHUNK_WORDS else []
+    for i in range(0, len(words), chunk_size - overlap):
+        chunk_words = words[i:i + chunk_size]
+        if len(chunk_words) >= MIN_CHUNK_WORDS:
+            chunks.append(" ".join(chunk_words))
     return chunks
 
-# ------------------ Document Extraction ------------------
 def extract_pdf_text(file_path):
     try:
         doc = fitz.open(file_path)
@@ -124,20 +115,20 @@ def extract_docx_text(file_path):
     return create_smart_chunks(" ".join(full_text)), 0
 
 def extract_txt_text(file_path):
-    with open(file_path,'r',encoding='utf-8',errors='ignore') as f:
-        text = f.read()
-    text = clean_text(text)
+    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+        text = clean_text(f.read())
     return create_smart_chunks(text), 0
 
 def process_document(file_path):
     ext = file_path.split('.')[-1].lower()
     if ext == "pdf":
         return extract_pdf_text(file_path)
-    elif ext in ["docx","doc"]:
+    elif ext in ["docx", "doc"]:
         return extract_docx_text(file_path)
     elif ext == "txt":
         return extract_txt_text(file_path)
-    return [],0
+    else:
+        return [], 0
 
 # ------------------ Embeddings ------------------
 def embed_chunks(chunks):
@@ -149,84 +140,82 @@ def embed_chunks(chunks):
             model_name="intfloat/multilingual-e5-large"
         )
     )
-    batch_size = 500
+    batch_size = 100
     for i in range(0, len(chunks), batch_size):
         batch = chunks[i:i+batch_size]
         collection.add(
             documents=batch,
             ids=[f"chunk_{i+j}" for j in range(len(batch))],
-            metadatas=[{"source":"Document"} for j in range(len(batch))]
+            metadatas=[{"source": "Document"} for j in range(len(batch))]
         )
     return collection
 
-# ------------------ Retrieval ------------------
 def retrieve_chunks(collection, query, top_k=5):
     if not collection or not query.strip():
         return []
     results = collection.query(query_texts=[query], n_results=top_k)
     chunks = results["documents"][0]
-    unique_chunks = []
     seen = set()
+    unique_chunks = []
     for chunk in chunks:
-        normalized = chunk.lower().strip()
-        if normalized not in seen:
-            seen.add(normalized)
+        norm = chunk.lower().strip()
+        if norm not in seen:
+            seen.add(norm)
             unique_chunks.append(chunk)
     return unique_chunks
 
-# ------------------ Streamlit UI ------------------
+# ------------------ Streamlit App ------------------
 st.set_page_config(page_title="Document Retrieval Chatbot", layout="wide")
-st.sidebar.markdown("# 🗂️ Document Retrieval")
+st.title("🗂️ Document Retrieval Chatbot")
 
-# New Chat
-if st.sidebar.button("✚ New Chat"):
+if "chats" not in st.session_state:
+    st.session_state.chats = {}
+if "current_chat_id" not in st.session_state:
     chat_id = str(uuid.uuid4())
-    st.session_state.chats[chat_id] = {"messages": [], "created_at": ""}
+    st.session_state.chats[chat_id] = {"messages": []}
     st.session_state.current_chat_id = chat_id
-    st.session_state.page_reload = not st.session_state.page_reload
 
 current_chat = st.session_state.chats[st.session_state.current_chat_id]
 
-# ------------------ Load Documents with Progress ------------------
-@st.cache_resource
-def load_documents_and_embeddings_with_progress():
-    all_files = [os.path.join(DOCUMENTS_FOLDER, f) for f in os.listdir(DOCUMENTS_FOLDER)]
-    all_chunks = []
-    if not all_files:
-        st.warning("📂 No documents found in the folder.")
-        return None
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    for idx, file_path in enumerate(all_files,1):
-        status_text.text(f"📄 Processing file {idx}/{len(all_files)}: {os.path.basename(file_path)}")
-        chunks,_ = process_document(file_path)
-        all_chunks.extend(chunks)
-        progress_bar.progress(idx / len(all_files))
-    if all_chunks:
-        status_text.text("🧠 Generating embeddings for all chunks...")
-        collection = embed_chunks(all_chunks)
-        status_text.text("✅ All documents processed and embeddings generated!")
-        progress_bar.empty()
-        return collection
-    status_text.text("⚠️ No chunks extracted from documents.")
-    progress_bar.empty()
-    return None
+st.sidebar.markdown("# 🗂️ Document Retrieval")
+if st.sidebar.button("✚ New Chat"):
+    chat_id = str(uuid.uuid4())
+    st.session_state.chats[chat_id] = {"messages": []}
+    st.session_state.current_chat_id = chat_id
+    st.experimental_rerun()
 
-collection = load_documents_and_embeddings_with_progress()
-
-# ------------------ Chat Interface ------------------
 for msg in current_chat["messages"]:
-    role = "You" if msg["role"]=="user" else "Assistant"
+    role = "You" if msg["role"] == "user" else "Assistant"
     st.markdown(f"**{role}:** {msg['content']}")
 
 st.markdown("---")
 
+@st.cache_resource
+def load_documents_and_embeddings_with_progress():
+    all_files = [os.path.join(DOCUMENTS_FOLDER, f) for f in os.listdir(DOCUMENTS_FOLDER)]
+    all_chunks = []
+    progress_text = st.empty()
+    for idx, file_path in enumerate(all_files, 1):
+        progress_text.text(f"📄 Processing file {idx}/{len(all_files)}: {os.path.basename(file_path)}")
+        chunks, _ = process_document(file_path)
+        all_chunks.extend(chunks)
+        time.sleep(0.1)
+    if all_chunks:
+        progress_text.text("🧠 Generating embeddings for all chunks...")
+        collection = embed_chunks(all_chunks)
+        progress_text.text("✅ Embeddings generated and stored in ChromaDB collection.")
+        return collection
+    progress_text.text("⚠️ No chunks extracted from documents.")
+    return None
+
+collection = load_documents_and_embeddings_with_progress()
+
 user_input = st.text_input("Ask your question here...")
+
 if user_input and collection:
-    current_chat["messages"].append({"role":"user","content":user_input})
+    current_chat["messages"].append({"role": "user", "content": user_input})
     with st.spinner("🔍 Retrieving relevant chunks..."):
         retrieved = retrieve_chunks(collection, user_input, top_k=5)
-        answer_text = "\n\n".join(retrieved) if retrieved else "No relevant information found."
-    current_chat["messages"].append({"role":"assistant","content":answer_text})
-    # تحديث تلقائي بدون experimental_rerun
-    st.session_state.page_reload = not st.session_state.page_reload
+        answer_text = "\n\n".join(retrieved) if retrieved else "No relevant information found in the documents."
+    current_chat["messages"].append({"role": "assistant", "content": answer_text})
+    st.experimental_rerun()
