@@ -12,12 +12,12 @@ OUTPUT_FOLDER = "extracted_images"
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
 # إعداد النموذج
-model_name = "prithivMLmods/Qwen2-VL-OCR-2B-Instruct"
+model_name = "prithivMLmods/Qwen2-VL-2B-Instruct"
 processor = AutoProcessor.from_pretrained(model_name)
 model = Qwen2VLForConditionalGeneration.from_pretrained(
-    model_name, torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-    device_map="auto"
+    model_name, torch_dtype=torch.float16, device_map="auto"
 )
+
 model.eval()
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model.to(device)
