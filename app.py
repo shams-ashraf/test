@@ -11,77 +11,20 @@ from sentence_transformers import SentenceTransformer
 import chromadb
 from chromadb.utils import embedding_functions
 import streamlit as st
-import pandas as pd
-import numpy as np
-from datetime import datetime
-
-# إعدادات الصفحة
-st.set_page_config(
-    page_title="معالج المستندات الذكي",
-    page_icon="📚",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# CSS مخصص لتحسين المظهر
-st.markdown("""
-    <style>
-    .main {
-        padding: 0rem 1rem;
-    }
-    .stAlert {
-        padding: 1rem;
-        border-radius: 0.5rem;
-    }
-    .chunk-container {
-        background-color: #f0f2f6;
-        padding: 1.5rem;
-        border-radius: 0.5rem;
-        margin: 1rem 0;
-        border-left: 4px solid #1f77b4;
-    }
-    .metric-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 1.5rem;
-        border-radius: 0.8rem;
-        color: white;
-        text-align: center;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-    }
-    .table-container {
-        background-color: #e8f4f8;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        margin: 1rem 0;
-    }
-    h1, h2, h3 {
-        color: #1f77b4;
-    }
-    .vector-info {
-        background-color: #fff3cd;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        border-left: 4px solid #ffc107;
-        margin: 0.5rem 0;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+import base64
 
 # OCR setup
-try:
-    pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
-except:
-    pass
+pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
 # Settings
-DOCUMENTS_FOLDER = "./documents"
+DOCUMENTS_FOLDER = "./Documents"
 MIN_WIDTH = 40
 MIN_HEIGHT = 40
 OUTPUT_FOLDER = "extracted_images"
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 os.makedirs(DOCUMENTS_FOLDER, exist_ok=True)
 
-# Text cleaning functions
+# Text cleaning
 def clean_text(text):
     text = re.sub(r'\s+', ' ', text)
     text = '\n'.join([line.strip() for line in text.split('\n') if line.strip()])
@@ -155,16 +98,13 @@ def structure_text_into_paragraphs(text):
     return structured_text.strip() if structured_text else text
 
 def extract_and_structure_text_from_image(image):
-    try:
-        raw_text = pytesseract.image_to_string(image, lang='eng+ara+deu')
-        if not raw_text.strip():
-            return ""
-        structured_text = structure_text_into_paragraphs(raw_text)
-        if '|' in structured_text or '\t' in structured_text or re.search(r'\d+\s+\w+\s+\d+', structured_text):
-            structured_text = "📊 [Table content from image]\n\n" + structured_text
-        return structured_text
-    except:
+    raw_text = pytesseract.image_to_string(image, lang='eng+ara+deu')
+    if not raw_text.strip():
         return ""
+    structured_text = structure_text_into_paragraphs(raw_text)
+    if '|' in structured_text or '\t' in structured_text or re.search(r'\d+\s+\w+\s+\d+', structured_text):
+        structured_text = "📊 [Table content from image]\n\n" + structured_text
+    return structured_text
 
 def create_smart_chunks(text, chunk_size=700, overlap=200):
     words = text.split()
@@ -207,105 +147,54 @@ def extract_table_from_docx(table, table_number=None):
 def extract_pdf_text(file_path):
     chunks = []
     tables_count = 0
-    images_extracted = 0
-    try:
-        doc = fitz.open(file_path)
-        full_text = ""
-        
-        # استخراج النصوص والصور
-        for page_num, page in enumerate(doc):
-            full_text += page.get_text()
-            
-            # استخراج الصور من الصفحة
-            images = page.get_images(full=True)
-            for img_index, img in enumerate(images):
-                try:
-                    xref = img[0]
-                    base_image = doc.extract_image(xref)
-                    image_bytes = base_image["image"]
-                    image_ext = base_image["ext"]
-                    
-                    # تحويل الصورة لـ PIL Image
-                    image = Image.open(io.BytesIO(image_bytes))
-                    
-                    # فلترة الصور الصغيرة
-                    if image.width >= MIN_WIDTH and image.height >= MIN_HEIGHT:
-                        # حفظ الصورة
-                        image_filename = f"pdf_page{page_num+1}_img{img_index+1}.{image_ext}"
-                        image_path = os.path.join(OUTPUT_FOLDER, image_filename)
-                        image.save(image_path)
-                        images_extracted += 1
-                        
-                        # استخراج النص من الصورة باستخدام OCR
-                        ocr_text = extract_and_structure_text_from_image(image)
-                        if ocr_text:
-                            full_text += f"\n\n📸 [Image {images_extracted}: {image_filename}]\n{ocr_text}\n"
-                except:
-                    continue
-        
-        structured = structure_text_into_paragraphs(full_text)
-        chunks = create_smart_chunks(structured)
-    except:
-        pass
-    return chunks, tables_count, images_extracted
+    doc = fitz.open(file_path)
+    for page_num, page in enumerate(doc):
+        text = page.get_text()
+        if text.strip():
+            structured = structure_text_into_paragraphs(text)
+            page_chunks = create_smart_chunks(structured)
+            chunks.extend(page_chunks)
+        images = page.get_images(full=True)
+        for img_index, img in enumerate(images):
+            xref = img[0]
+            base_image = doc.extract_image(xref)
+            image_bytes = base_image["image"]
+            image = Image.open(io.BytesIO(image_bytes))
+            if image.width >= MIN_WIDTH and image.height >= MIN_HEIGHT:
+                img_text = extract_and_structure_text_from_image(image)
+                if img_text.strip():
+                    if '📊' in img_text:
+                        tables_count += 1
+                    chunks.append(img_text)
+    doc.close()
+    return chunks, tables_count
 
 def extract_docx_text(file_path):
     chunks = []
     tables_count = 0
-    images_extracted = 0
-    try:
-        doc = docx.Document(file_path)
-        full_text = ""
-        
-        # استخراج النصوص من الفقرات
-        for para in doc.paragraphs:
-            full_text += para.text + "\n"
-        
-        # استخراج الجداول
-        tables_count = len(doc.tables)
-        for idx, table in enumerate(doc.tables, 1):
-            table_text = extract_table_from_docx(table, idx)
-            if table_text:
-                full_text += "\n" + table_text + "\n"
-        
-        # استخراج الصور من DOCX
-        for rel in doc.part.rels.values():
-            if "image" in rel.target_ref:
-                try:
-                    image_data = rel.target_part.blob
-                    image = Image.open(io.BytesIO(image_data))
-                    
-                    # فلترة الصور الصغيرة
-                    if image.width >= MIN_WIDTH and image.height >= MIN_HEIGHT:
-                        images_extracted += 1
-                        # حفظ الصورة
-                        image_filename = f"docx_img{images_extracted}.png"
-                        image_path = os.path.join(OUTPUT_FOLDER, image_filename)
-                        image.save(image_path)
-                        
-                        # استخراج النص من الصورة باستخدام OCR
-                        ocr_text = extract_and_structure_text_from_image(image)
-                        if ocr_text:
-                            full_text += f"\n\n📸 [Image {images_extracted}: {image_filename}]\n{ocr_text}\n"
-                except:
-                    continue
-        
-        structured = structure_text_into_paragraphs(full_text)
-        chunks = create_smart_chunks(structured)
-    except:
-        pass
-    return chunks, tables_count, images_extracted
+    doc = docx.Document(file_path)
+    full_text = []
+    for para in doc.paragraphs:
+        if para.text.strip():
+            full_text.append(para.text)
+    if full_text:
+        combined_text = "\n".join(full_text)
+        structured = structure_text_into_paragraphs(combined_text)
+        text_chunks = create_smart_chunks(structured)
+        chunks.extend(text_chunks)
+    for idx, table in enumerate(doc.tables, 1):
+        table_text = extract_table_from_docx(table, idx)
+        if table_text.strip():
+            tables_count += 1
+            chunks.append(table_text)
+    return chunks, tables_count
 
 def extract_txt_text(file_path):
-    chunks = []
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            text = f.read()
-        structured = structure_text_into_paragraphs(text)
-        chunks = create_smart_chunks(structured)
-    except:
-        pass
-    return chunks, 0, 0
+    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+        text = f.read()
+    structured = structure_text_into_paragraphs(text)
+    chunks = create_smart_chunks(structured)
+    return chunks, 0
 
 def process_document(file_path):
     ext = file_path.split('.')[-1].lower()
@@ -318,11 +207,7 @@ def process_document(file_path):
     else:
         return [], 0
 
-@st.cache_resource
-def get_embedding_model():
-    return SentenceTransformer("intfloat/multilingual-e5-large")
-
-def embed_chunks(chunks, progress_bar=None):
+def embed_chunks(chunks):
     client = chromadb.Client()
     collection_name = f"docs_{uuid.uuid4().hex[:8]}"
     collection = client.create_collection(
@@ -331,258 +216,149 @@ def embed_chunks(chunks, progress_bar=None):
             model_name="intfloat/multilingual-e5-large"
         )
     )
-    batch_size = 100
-    total_batches = (len(chunks) + batch_size - 1) // batch_size
-    
+    batch_size = 500
     for i in range(0, len(chunks), batch_size):
         batch = chunks[i:i+batch_size]
         collection.add(
             documents=batch,
             ids=[f"chunk_{i+j}" for j in range(len(batch))],
-            metadatas=[{"source": "Document", "chunk_index": i+j} for j in range(len(batch))]
+            metadatas=[{"source": "Document"} for j in range(len(batch))]
         )
-        if progress_bar:
-            progress_bar.progress((i + batch_size) / len(chunks))
-    
     return collection
 
-# واجهة التطبيق
-st.title("📚 معالج المستندات الذكي مع ChromaDB")
-st.markdown("---")
-
-# Sidebar
-with st.sidebar:
-    st.header("⚙️ الإعدادات")
-    chunk_size = st.slider("حجم القطعة (Chunk Size)", 300, 1000, 700, 50)
-    overlap = st.slider("التداخل (Overlap)", 50, 300, 200, 50)
-    
-    st.markdown("---")
-    st.header("📤 رفع الملفات")
-    uploaded_files = st.file_uploader(
-        "اختر الملفات",
-        type=['pdf', 'docx', 'doc', 'txt'],
-        accept_multiple_files=True
+# ============= Streamlit UI =============
+def main():
+    st.set_page_config(
+        page_title="Document Processor",
+        page_icon="📄",
+        layout="wide"
     )
     
-    process_button = st.button("🚀 معالجة الملفات", use_container_width=True)
-
-# Main content
-if process_button and uploaded_files:
-    # حفظ الملفات المرفوعة
-    for uploaded_file in uploaded_files:
-        file_path = os.path.join(DOCUMENTS_FOLDER, uploaded_file.name)
-        with open(file_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-    
-    st.success(f"✅ تم رفع {len(uploaded_files)} ملف بنجاح!")
-    
-    # معالجة المستندات
-    st.header("📊 نتائج المعالجة")
-    
-    all_chunks = []
-    total_tables = 0
-    total_images = 0
-    file_stats = []
-    
-    progress_text = st.empty()
-    main_progress = st.progress(0)
-    
-    files = [os.path.join(DOCUMENTS_FOLDER, f) for f in os.listdir(DOCUMENTS_FOLDER)]
-    
-    for idx, file_path in enumerate(files):
-        progress_text.text(f"⏳ معالجة الملف: {os.path.basename(file_path)}")
-        main_progress.progress((idx + 1) / len(files))
-        
-        with st.expander(f"📄 {os.path.basename(file_path)}", expanded=True):
-            chunks, tables_count, images_count = process_document(file_path)
-            
-            # إحصائيات الملف
-            col1, col2, col3, col4, col5 = st.columns(5)
-            with col1:
-                st.metric("📝 عدد القطع", len(chunks))
-            with col2:
-                st.metric("📊 الجداول", tables_count)
-            with col3:
-                st.metric("📸 الصور", images_count)
-            with col4:
-                total_words = sum(len(chunk.split()) for chunk in chunks)
-                st.metric("📖 الكلمات", f"{total_words:,}")
-            with col5:
-                file_size = os.path.getsize(file_path) / 1024
-                st.metric("💾 الحجم", f"{file_size:.1f} KB")
-            
-            # عرض القطع
-            st.markdown("### 📑 القطع المستخرجة")
-            for chunk_idx, chunk in enumerate(chunks, 1):
-                st.markdown(f"""
-                <div class='chunk-container'>
-                    <h4>📄 القطعة رقم {chunk_idx}</h4>
-                    <p style='white-space: pre-wrap; font-family: monospace;'>{chunk}</p>
-                    <small>📏 عدد الكلمات: {len(chunk.split())}</small>
-                </div>
-                """, unsafe_allow_html=True)
-            
-            all_chunks.extend(chunks)
-            total_tables += tables_count
-            total_images += images_count
-            file_stats.append({
-                'اسم الملف': os.path.basename(file_path),
-                'القطع': len(chunks),
-                'الجداول': tables_count,
-                'الصور': images_count,
-                'الكلمات': total_words
-            })
-    
-    progress_text.text("✅ اكتملت معالجة جميع الملفات!")
-    
-    # ملخص عام
+    st.title("📄 Document Processor & Embedding Generator")
     st.markdown("---")
-    st.header("📈 الملخص الإجمالي")
     
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.markdown(f"""
-        <div class='metric-card'>
-            <h2>{len(files)}</h2>
-            <p>📁 إجمالي الملفات</p>
-        </div>
-        """, unsafe_allow_html=True)
-    with col2:
-        st.markdown(f"""
-        <div class='metric-card'>
-            <h2>{len(all_chunks)}</h2>
-            <p>📝 إجمالي القطع</p>
-        </div>
-        """, unsafe_allow_html=True)
-    with col3:
-        st.markdown(f"""
-        <div class='metric-card'>
-            <h2>{total_tables}</h2>
-            <p>📊 إجمالي الجداول</p>
-        </div>
-        """, unsafe_allow_html=True)
-    with col4:
-        st.markdown(f"""
-        <div class='metric-card'>
-            <h2>{total_images}</h2>
-            <p>📸 إجمالي الصور</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # جدول الإحصائيات
-    st.markdown("### 📋 جدول الإحصائيات التفصيلي")
-    df_stats = pd.DataFrame(file_stats)
-    st.dataframe(df_stats, use_container_width=True)
-    
-    # عرض الصور المستخرجة
-    if total_images > 0:
-        st.markdown("---")
-        st.header("📸 الصور المستخرجة")
+    # Sidebar
+    with st.sidebar:
+        st.header("⚙️ Settings")
+        st.info("Upload documents to process and generate embeddings")
         
-        # عرض الصور في grid
-        image_files = [f for f in os.listdir(OUTPUT_FOLDER) if f.endswith(('.png', '.jpg', '.jpeg'))]
-        
-        if image_files:
-            cols_per_row = 3
-            for i in range(0, len(image_files), cols_per_row):
-                cols = st.columns(cols_per_row)
-                for j, col in enumerate(cols):
-                    if i + j < len(image_files):
-                        img_path = os.path.join(OUTPUT_FOLDER, image_files[i + j])
-                        with col:
-                            st.image(img_path, caption=image_files[i + j], use_container_width=True)
-    
-    # إنشاء Embeddings
-    st.markdown("---")
-    st.header("🧠 إنشاء Embeddings")
-    
-    with st.spinner("⏳ جاري إنشاء الـ Embeddings..."):
-        embed_progress = st.progress(0)
-        collection = embed_chunks(all_chunks, embed_progress)
-        st.success("✅ تم إنشاء الـ Embeddings بنجاح!")
-    
-    # معلومات ChromaDB
-    st.markdown("### 🗄️ معلومات قاعدة البيانات الشعاعية")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown(f"""
-        <div class='vector-info'>
-            <h4>📦 معلومات المجموعة</h4>
-            <ul>
-                <li><b>اسم المجموعة:</b> {collection.name}</li>
-                <li><b>عدد الـ Vectors:</b> {collection.count()}</li>
-                <li><b>نموذج Embedding:</b> multilingual-e5-large</li>
-                <li><b>أبعاد Vector:</b> 1024</li>
-            </ul>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col2:
-        st.markdown(f"""
-        <div class='vector-info'>
-            <h4>📊 إحصائيات Embedding</h4>
-            <ul>
-                <li><b>إجمالي Chunks:</b> {len(all_chunks)}</li>
-                <li><b>حجم Chunk:</b> {chunk_size} كلمة</li>
-                <li><b>التداخل:</b> {overlap} كلمة</li>
-                <li><b>الوقت:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</li>
-            </ul>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # عرض عينة من الـ Embeddings
-    st.markdown("### 🔍 عينة من الـ Vectors")
-    sample_results = collection.get(limit=3, include=['embeddings', 'documents', 'metadatas'])
-    
-    for i in range(min(3, len(sample_results['ids']))):
-        with st.expander(f"Vector #{i+1} - {sample_results['ids'][i]}"):
-            st.markdown(f"**النص:**")
-            st.text(sample_results['documents'][i][:300] + "...")
-            st.markdown(f"**Metadata:**")
-            st.json(sample_results['metadatas'][i])
-            st.markdown(f"**Vector (أول 10 قيم):**")
-            vector_sample = sample_results['embeddings'][i][:10]
-            st.code(f"[{', '.join([f'{v:.4f}' for v in vector_sample])}, ...]")
-    
-    # البحث التجريبي
-    st.markdown("---")
-    st.header("🔎 البحث التجريبي")
-    query = st.text_input("أدخل استعلام البحث:")
-    
-    if query:
-        results = collection.query(
-            query_texts=[query],
-            n_results=3
+        uploaded_files = st.file_uploader(
+            "Upload Documents",
+            type=['pdf', 'docx', 'doc', 'txt'],
+            accept_multiple_files=True
         )
         
-        st.markdown("### 📊 نتائج البحث")
-        for i, (doc, distance) in enumerate(zip(results['documents'][0], results['distances'][0])):
-            similarity = 1 - distance
-            st.markdown(f"""
-            <div class='chunk-container'>
-                <h4>🎯 النتيجة #{i+1} - التشابه: {similarity:.2%}</h4>
-                <p>{doc[:400]}...</p>
-            </div>
-            """, unsafe_allow_html=True)
+        if st.button("🔄 Process All Documents in Folder"):
+            st.session_state['process_folder'] = True
+    
+    # Main content
+    col1, col2 = st.columns([2, 1])
+    
+    with col2:
+        st.subheader("📊 Statistics")
+        stats_placeholder = st.empty()
+    
+    with col1:
+        st.subheader("📑 Processed Documents")
+        
+        if uploaded_files:
+            all_chunks = []
+            
+            for uploaded_file in uploaded_files:
+                with st.expander(f"📄 {uploaded_file.name}", expanded=True):
+                    # Save uploaded file temporarily
+                    file_path = os.path.join(DOCUMENTS_FOLDER, uploaded_file.name)
+                    with open(file_path, "wb") as f:
+                        f.write(uploaded_file.getbuffer())
+                    
+                    with st.spinner(f"Processing {uploaded_file.name}..."):
+                        chunks, tables_count = process_document(file_path)
+                        all_chunks.extend(chunks)
+                    
+                    st.success(f"✅ Extracted {len(chunks)} chunks")
+                    st.info(f"📊 Detected {tables_count} tables")
+                    
+                    # Display chunks
+                    for idx, chunk in enumerate(chunks, 1):
+                        with st.container():
+                            st.markdown(f"**Chunk {idx}**")
+                            
+                            # Check if it's a table
+                            if "📊" in chunk or "┌─" in chunk:
+                                st.code(chunk, language=None)
+                            else:
+                                st.text_area(
+                                    f"Content {idx}",
+                                    chunk,
+                                    height=200,
+                                    key=f"{uploaded_file.name}_{idx}",
+                                    label_visibility="collapsed"
+                                )
+                            st.markdown("---")
+            
+            # Update statistics
+            with stats_placeholder.container():
+                st.metric("Total Files", len(uploaded_files))
+                st.metric("Total Chunks", len(all_chunks))
+                
+            # Generate embeddings button
+            if st.button("🚀 Generate Embeddings", type="primary"):
+                with st.spinner("Generating embeddings..."):
+                    collection = embed_chunks(all_chunks)
+                    st.success("✅ Embeddings generated successfully!")
+                    st.balloons()
+        
+        elif 'process_folder' in st.session_state and st.session_state['process_folder']:
+            all_files = [os.path.join(DOCUMENTS_FOLDER, f) for f in os.listdir(DOCUMENTS_FOLDER) if f.split('.')[-1].lower() in ['pdf', 'docx', 'doc', 'txt']]
+            
+            if not all_files:
+                st.warning("⚠️ No documents found in the Documents folder!")
+            else:
+                all_chunks = []
+                
+                for file_path in all_files:
+                    file_name = os.path.basename(file_path)
+                    with st.expander(f"📄 {file_name}", expanded=True):
+                        with st.spinner(f"Processing {file_name}..."):
+                            chunks, tables_count = process_document(file_path)
+                            all_chunks.extend(chunks)
+                        
+                        st.success(f"✅ Extracted {len(chunks)} chunks")
+                        st.info(f"📊 Detected {tables_count} tables")
+                        
+                        # Display chunks
+                        for idx, chunk in enumerate(chunks, 1):
+                            with st.container():
+                                st.markdown(f"**Chunk {idx}**")
+                                
+                                # Check if it's a table
+                                if "📊" in chunk or "┌─" in chunk:
+                                    st.code(chunk, language=None)
+                                else:
+                                    st.text_area(
+                                        f"Content {idx}",
+                                        chunk,
+                                        height=200,
+                                        key=f"{file_name}_{idx}",
+                                        label_visibility="collapsed"
+                                    )
+                                st.markdown("---")
+                
+                # Update statistics
+                with stats_placeholder.container():
+                    st.metric("Total Files", len(all_files))
+                    st.metric("Total Chunks", len(all_chunks))
+                
+                # Generate embeddings
+                with st.spinner("Generating embeddings..."):
+                    collection = embed_chunks(all_chunks)
+                    st.success("✅ Embeddings generated successfully!")
+                    st.balloons()
+                
+                st.session_state['process_folder'] = False
+        
+        else:
+            st.info("👆 Upload documents using the sidebar or process existing documents in the folder")
 
-else:
-    # صفحة البداية
-    st.info("👈 ابدأ برفع الملفات من القائمة الجانبية")
-    
-    st.markdown("""
-    ### 🌟 الميزات
-    - 📄 دعم ملفات PDF, DOCX, TXT
-    - 🔍 استخراج النصوص والجداول
-    - 🧩 تقسيم ذكي للنصوص (Smart Chunking)
-    - 🧠 إنشاء Embeddings باستخدام نموذج متعدد اللغات
-    - 🗄️ تخزين في ChromaDB
-    - 🔎 بحث دلالي (Semantic Search)
-    - 📊 إحصائيات مفصلة
-    
-    ### 📖 كيفية الاستخدام
-    1. ارفع ملف أو أكثر من القائمة الجانبية
-    2. اضغط على "معالجة الملفات"
-    3. شاهد النتائج والإحصائيات
-    4. جرب البحث الدلالي!
-    """)
+if __name__ == "__main__":
+    main()
