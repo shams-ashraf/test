@@ -60,6 +60,9 @@ if 'processed' not in st.session_state:
     st.session_state.files_data = {}
     st.session_state.collection = None
 
+MIN_WIDTH = 40
+MIN_HEIGHT = 40
+
 # Helper Functions
 def clean_text(text):
     text = re.sub(r'\s+', ' ', text)
@@ -133,6 +136,13 @@ def format_table_as_structured_text(extracted_table, table_number=None):
     formatted_lines.append("\n" + "─" * 50 + "\n")
     return "\n".join(formatted_lines)
 
+def extract_and_structure_text_from_image(image):
+    raw_text = pytesseract.image_to_string(image, lang='eng+ara')
+    if not raw_text.strip():
+        return ""
+    structured_text = structure_text_into_paragraphs(raw_text)
+    return structured_text
+
 def extract_pdf_detailed(file):
     doc = fitz.open(stream=file.read(), filetype="pdf")
     
@@ -147,13 +157,51 @@ def extract_pdf_detailed(file):
     
     for page_num in range(len(doc)):
         page = doc[page_num]
-        page_text = f"\n{'═' * 60}\n📄 صفحة {page_num + 1}\n{'═' * 60}\n\n"
         
-        # Extract text
-        text = page.get_text()
-        if text.strip():
-            structured_text = structure_text_into_paragraphs(text)
-            page_text += structured_text + "\n\n"
+        # Collect all elements with positions
+        all_elements = []
+        
+        # Extract text blocks
+        text_blocks = page.get_text("dict")["blocks"]
+        for block in text_blocks:
+            if block.get('type') == 0:
+                y_pos = block.get('bbox', [0, 0, 0, 0])[1]
+                text_content = ""
+                for line in block.get('lines', []):
+                    for span in line.get('spans', []):
+                        text_content += span.get('text', '') + ' '
+                if text_content.strip():
+                    structured_content = structure_text_into_paragraphs(text_content)
+                    all_elements.append({
+                        'type': 'text',
+                        'y_position': y_pos,
+                        'content': structured_content
+                    })
+        
+        # Extract images with OCR
+        images = page.get_images(full=True)
+        if images:
+            file_info['pages_with_images'].append(page_num + 1)
+            file_info['total_images'] += len(images)
+            
+            for img_index, img in enumerate(images):
+                xref = img[0]
+                img_rects = page.get_image_rects(xref)
+                if img_rects:
+                    img_rect = img_rects[0]
+                    base_image = doc.extract_image(xref)
+                    image_bytes = base_image["image"]
+                    image = Image.open(io.BytesIO(image_bytes))
+                    width, height = image.size
+                    
+                    if width >= MIN_WIDTH and height >= MIN_HEIGHT:
+                        structured_text = extract_and_structure_text_from_image(image)
+                        if structured_text:
+                            all_elements.append({
+                                'type': 'image',
+                                'y_position': img_rect.y0,
+                                'content': f"\n╔{'═' * 58}╗\n║  📷 صورة {img_index + 1} (أبعاد: {width}x{height}){' ' * (34 - len(str(width)) - len(str(height)))}║\n╚{'═' * 58}╝\n\n{structured_text}"
+                            })
         
         # Extract tables
         tables = page.find_tables()
@@ -161,17 +209,24 @@ def extract_pdf_detailed(file):
             file_info['pages_with_tables'].append(page_num + 1)
             for table_num, table in enumerate(tables.tables, 1):
                 file_info['total_tables'] += 1
+                table_bbox = table.bbox
+                y_position = table_bbox[1] if table_bbox else 0
                 extracted_table = table.extract()
                 if extracted_table:
                     table_text = format_table_as_structured_text(extracted_table, file_info['total_tables'])
-                    page_text += table_text + "\n\n"
+                    all_elements.append({
+                        'type': 'table',
+                        'y_position': y_position,
+                        'content': table_text
+                    })
         
-        # Extract images
-        images = page.get_images(full=True)
-        if images:
-            file_info['pages_with_images'].append(page_num + 1)
-            file_info['total_images'] += len(images)
-            page_text += f"\n📷 الصفحة تحتوي على {len(images)} صورة\n\n"
+        # Sort all elements by Y position
+        all_elements.sort(key=lambda x: x['y_position'])
+        
+        # Build page text
+        page_text = f"\n{'═' * 60}\n📄 صفحة {page_num + 1}\n{'═' * 60}\n\n"
+        for element in all_elements:
+            page_text += element['content'] + "\n\n"
         
         # Create chunks for this page
         page_chunks = create_smart_chunks(page_text, chunk_size=500, overlap=100)
