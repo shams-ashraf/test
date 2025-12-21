@@ -1,6 +1,10 @@
 streamlit
-torch
-transformers
-Pillow
 PyMuPDF
+sentence-transformers
+chromadb
+requests
+langdetect
 python-docx
+pytesseract
+Pillow
+
