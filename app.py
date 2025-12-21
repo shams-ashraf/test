@@ -1,16 +1,22 @@
 import streamlit as st
-import os
 import re
 import fitz
 import io
 import docx
-from PIL import Image
 import pytesseract
 import uuid
+import glob
 from sentence_transformers import SentenceTransformer
 import chromadb
 from chromadb.utils import embedding_functions
-import glob
+import requests
+import json
+from datetime import datetime
+from langdetect import detect
+from io import BytesIO
+from PIL import Image
+import os
+import time
 
 # Configuration
 st.set_page_config(
