@@ -12,7 +12,7 @@ import chromadb
 from chromadb.utils import embedding_functions
 
 # ------------------ Settings ------------------
-DOCUMENTS_FOLDER = "documents"
+DOCUMENTS_FOLDER = "./documents"
 pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
 # ------------------ Session State Initialization ------------------
