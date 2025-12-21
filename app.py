@@ -74,7 +74,7 @@ except:
     pass
 
 # Settings
-DOCUMENTS_FOLDER = "./Documents"
+DOCUMENTS_FOLDER = "./documents"
 MIN_WIDTH = 40
 MIN_HEIGHT = 40
 OUTPUT_FOLDER = "extracted_images"
@@ -207,35 +207,94 @@ def extract_table_from_docx(table, table_number=None):
 def extract_pdf_text(file_path):
     chunks = []
     tables_count = 0
+    images_extracted = 0
     try:
         doc = fitz.open(file_path)
         full_text = ""
-        for page in doc:
+        
+        # استخراج النصوص والصور
+        for page_num, page in enumerate(doc):
             full_text += page.get_text()
+            
+            # استخراج الصور من الصفحة
+            images = page.get_images(full=True)
+            for img_index, img in enumerate(images):
+                try:
+                    xref = img[0]
+                    base_image = doc.extract_image(xref)
+                    image_bytes = base_image["image"]
+                    image_ext = base_image["ext"]
+                    
+                    # تحويل الصورة لـ PIL Image
+                    image = Image.open(io.BytesIO(image_bytes))
+                    
+                    # فلترة الصور الصغيرة
+                    if image.width >= MIN_WIDTH and image.height >= MIN_HEIGHT:
+                        # حفظ الصورة
+                        image_filename = f"pdf_page{page_num+1}_img{img_index+1}.{image_ext}"
+                        image_path = os.path.join(OUTPUT_FOLDER, image_filename)
+                        image.save(image_path)
+                        images_extracted += 1
+                        
+                        # استخراج النص من الصورة باستخدام OCR
+                        ocr_text = extract_and_structure_text_from_image(image)
+                        if ocr_text:
+                            full_text += f"\n\n📸 [Image {images_extracted}: {image_filename}]\n{ocr_text}\n"
+                except:
+                    continue
+        
         structured = structure_text_into_paragraphs(full_text)
         chunks = create_smart_chunks(structured)
     except:
         pass
-    return chunks, tables_count
+    return chunks, tables_count, images_extracted
 
 def extract_docx_text(file_path):
     chunks = []
     tables_count = 0
+    images_extracted = 0
     try:
         doc = docx.Document(file_path)
         full_text = ""
+        
+        # استخراج النصوص من الفقرات
         for para in doc.paragraphs:
             full_text += para.text + "\n"
+        
+        # استخراج الجداول
         tables_count = len(doc.tables)
         for idx, table in enumerate(doc.tables, 1):
             table_text = extract_table_from_docx(table, idx)
             if table_text:
                 full_text += "\n" + table_text + "\n"
+        
+        # استخراج الصور من DOCX
+        for rel in doc.part.rels.values():
+            if "image" in rel.target_ref:
+                try:
+                    image_data = rel.target_part.blob
+                    image = Image.open(io.BytesIO(image_data))
+                    
+                    # فلترة الصور الصغيرة
+                    if image.width >= MIN_WIDTH and image.height >= MIN_HEIGHT:
+                        images_extracted += 1
+                        # حفظ الصورة
+                        image_filename = f"docx_img{images_extracted}.png"
+                        image_path = os.path.join(OUTPUT_FOLDER, image_filename)
+                        image.save(image_path)
+                        
+                        # استخراج النص من الصورة باستخدام OCR
+                        ocr_text = extract_and_structure_text_from_image(image)
+                        if ocr_text:
+                            full_text += f"\n\n📸 [Image {images_extracted}: {image_filename}]\n{ocr_text}\n"
+                except:
+                    continue
+        
         structured = structure_text_into_paragraphs(full_text)
         chunks = create_smart_chunks(structured)
     except:
         pass
-    return chunks, tables_count
+    return chunks, tables_count, images_extracted
 
 def extract_txt_text(file_path):
     chunks = []
@@ -246,7 +305,7 @@ def extract_txt_text(file_path):
         chunks = create_smart_chunks(structured)
     except:
         pass
-    return chunks, 0
+    return chunks, 0, 0
 
 def process_document(file_path):
     ext = file_path.split('.')[-1].lower()
@@ -322,6 +381,7 @@ if process_button and uploaded_files:
     
     all_chunks = []
     total_tables = 0
+    total_images = 0
     file_stats = []
     
     progress_text = st.empty()
@@ -334,18 +394,20 @@ if process_button and uploaded_files:
         main_progress.progress((idx + 1) / len(files))
         
         with st.expander(f"📄 {os.path.basename(file_path)}", expanded=True):
-            chunks, tables_count = process_document(file_path)
+            chunks, tables_count, images_count = process_document(file_path)
             
             # إحصائيات الملف
-            col1, col2, col3, col4 = st.columns(4)
+            col1, col2, col3, col4, col5 = st.columns(5)
             with col1:
                 st.metric("📝 عدد القطع", len(chunks))
             with col2:
                 st.metric("📊 الجداول", tables_count)
             with col3:
+                st.metric("📸 الصور", images_count)
+            with col4:
                 total_words = sum(len(chunk.split()) for chunk in chunks)
                 st.metric("📖 الكلمات", f"{total_words:,}")
-            with col4:
+            with col5:
                 file_size = os.path.getsize(file_path) / 1024
                 st.metric("💾 الحجم", f"{file_size:.1f} KB")
             
@@ -362,10 +424,12 @@ if process_button and uploaded_files:
             
             all_chunks.extend(chunks)
             total_tables += tables_count
+            total_images += images_count
             file_stats.append({
                 'اسم الملف': os.path.basename(file_path),
                 'القطع': len(chunks),
                 'الجداول': tables_count,
+                'الصور': images_count,
                 'الكلمات': total_words
             })
     
@@ -375,7 +439,7 @@ if process_button and uploaded_files:
     st.markdown("---")
     st.header("📈 الملخص الإجمالي")
     
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.markdown(f"""
         <div class='metric-card'>
@@ -397,11 +461,36 @@ if process_button and uploaded_files:
             <p>📊 إجمالي الجداول</p>
         </div>
         """, unsafe_allow_html=True)
+    with col4:
+        st.markdown(f"""
+        <div class='metric-card'>
+            <h2>{total_images}</h2>
+            <p>📸 إجمالي الصور</p>
+        </div>
+        """, unsafe_allow_html=True)
     
     # جدول الإحصائيات
     st.markdown("### 📋 جدول الإحصائيات التفصيلي")
     df_stats = pd.DataFrame(file_stats)
     st.dataframe(df_stats, use_container_width=True)
+    
+    # عرض الصور المستخرجة
+    if total_images > 0:
+        st.markdown("---")
+        st.header("📸 الصور المستخرجة")
+        
+        # عرض الصور في grid
+        image_files = [f for f in os.listdir(OUTPUT_FOLDER) if f.endswith(('.png', '.jpg', '.jpeg'))]
+        
+        if image_files:
+            cols_per_row = 3
+            for i in range(0, len(image_files), cols_per_row):
+                cols = st.columns(cols_per_row)
+                for j, col in enumerate(cols):
+                    if i + j < len(image_files):
+                        img_path = os.path.join(OUTPUT_FOLDER, image_files[i + j])
+                        with col:
+                            st.image(img_path, caption=image_files[i + j], use_container_width=True)
     
     # إنشاء Embeddings
     st.markdown("---")
