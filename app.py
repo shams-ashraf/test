@@ -10,6 +10,7 @@ import uuid
 from sentence_transformers import SentenceTransformer
 import chromadb
 from chromadb.utils import embedding_functions
+from groq import Groq
 
 # Configuration
 st.set_page_config(
@@ -64,6 +65,13 @@ if 'processed' not in st.session_state:
 
 MIN_WIDTH = 40
 MIN_HEIGHT = 40
+
+# Groq Configuration
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL = "llama-3.3-70b-versatile"
+
+if not GROQ_API_KEY:
+    st.error("⚠️ لم يتم العثور على GROQ_API_KEY في متغيرات البيئة!")
 
 # Helper Functions
 def clean_text(text):
@@ -376,6 +384,54 @@ def get_embedding_function():
         model_name="intfloat/multilingual-e5-large"
     )
 
+def answer_question_with_groq(query, relevant_chunks):
+    """استخدام Groq للإجابة على السؤال بناءً على المحتوى المستخرج فقط"""
+    if not GROQ_API_KEY:
+        return "❌ الرجاء تعيين GROQ_API_KEY في متغيرات البيئة"
+    
+    try:
+        client = Groq(api_key=GROQ_API_KEY)
+        
+        # تجهيز السياق من القطع
+        context = "\n\n---\n\n".join(relevant_chunks[:5])  # أفضل 5 نتائج
+        
+        # Prompt محكم جداً
+        system_prompt = """أنت مساعد ذكي متخصص في الإجابة على الأسئلة من المستندات فقط.
+
+قواعد صارمة يجب الالتزام بها:
+1. اعتمد فقط وحصرياً على المحتوى المقدم في السياق
+2. إذا لم تجد الإجابة في السياق، قل بوضوح "لا توجد معلومات كافية في المستندات للإجابة على هذا السؤال"
+3. لا تضف أي معلومات من معرفتك الخاصة مهما كانت
+4. إذا كانت المعلومات جزئية، أذكر ذلك بوضوح
+5. اقتبس من النص مباشرة عندما يكون ذلك ممكناً
+6. كن دقيقاً ومحدداً في إجابتك
+7. إذا وجدت معلومات متناقضة، اذكر ذلك
+8. أجب بالعربية بشكل واضح ومنظم"""
+
+        user_prompt = f"""السياق من المستندات:
+{context}
+
+السؤال: {query}
+
+الإجابة (استناداً فقط على السياق أعلاه):"""
+
+        chat_completion = client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            model=GROQ_MODEL,
+            temperature=0.1,  # أقل حرارة للدقة
+            max_tokens=2000,
+            top_p=0.9
+        )
+        
+        answer = chat_completion.choices[0].message.content
+        return answer
+        
+    except Exception as e:
+        return f"❌ حدث خطأ في الاتصال بـ Groq: {str(e)}"
+
 # Main UI
 st.markdown("""
 <div class="main-header">
@@ -529,19 +585,44 @@ if st.session_state.processed:
     
     st.markdown("---")
     
-    # Search Functionality
-    st.subheader("🔍 البحث في جميع المستندات")
-    query = st.text_input("ابحث عن محتوى معين...")
+    # Search Functionality with Groq
+    st.subheader("🔍 اسأل عن المستندات")
+    query = st.text_input("اكتب سؤالك هنا...")
+    
+    col_search1, col_search2 = st.columns([3, 1])
+    with col_search1:
+        search_only = st.checkbox("بحث فقط (بدون إجابة ذكية)", value=False)
+    with col_search2:
+        num_results = st.selectbox("عدد النتائج", [5, 10, 15, 20], index=0)
     
     if query:
-        results = st.session_state.collection.query(
-            query_texts=[query],
-            n_results=10
-        )
+        with st.spinner("جاري البحث..."):
+            results = st.session_state.collection.query(
+                query_texts=[query],
+                n_results=num_results
+            )
         
-        st.markdown("### نتائج البحث:")
+        if not search_only and GROQ_API_KEY:
+            st.markdown("### 🤖 الإجابة الذكية:")
+            with st.spinner("جاري توليد الإجابة..."):
+                answer = answer_question_with_groq(query, results["documents"][0])
+            
+            st.markdown(f"""
+            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                        color: white; 
+                        padding: 2rem; 
+                        border-radius: 10px; 
+                        margin: 1rem 0;
+                        direction: rtl;">
+                {answer}
+            </div>
+            """, unsafe_allow_html=True)
+            
+            st.markdown("---")
+        
+        st.markdown("### 📄 مصادر الإجابة:")
         for idx, (chunk, metadata) in enumerate(zip(results["documents"][0], results["metadatas"][0]), 1):
-            with st.expander(f"📄 نتيجة {idx} - من ملف: {metadata['source']}"):
+            with st.expander(f"📄 مصدر {idx} - من ملف: {metadata['source']}"):
                 st.markdown(f'<div class="chunk-card">{chunk}</div>', unsafe_allow_html=True)
 
 else:
