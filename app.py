@@ -36,6 +36,8 @@ st.markdown("""
         border-right: 4px solid #667eea;
         margin-bottom: 1rem;
         direction: rtl;
+        white-space: pre-wrap;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     }
     .stats-box {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -66,35 +68,89 @@ MIN_HEIGHT = 40
 # Helper Functions
 def clean_text(text):
     text = re.sub(r'\s+', ' ', text)
+    text = '\n'.join([line.strip() for line in text.split('\n') if line.strip()])
     return text.strip()
 
 def structure_text_into_paragraphs(text):
     if not text or not text.strip():
         return ""
+
     text = clean_text(text)
     lines = [line.strip() for line in text.split('\n') if line.strip()]
+
+    if not lines:
+        return ""
+
     paragraphs = []
     current_paragraph = []
-    
+
     for i, line in enumerate(lines):
         words_in_line = line.split()
-        if len(words_in_line) < 3:
+        if len(words_in_line) < 3 and not (line[0].isupper() or re.match(r'^[\d]+[\.\):]', line)):
             continue
-            
-        current_paragraph.append(line)
-        ends_with_punctuation = line.endswith(('.', '!', '?', '؟', '!', '。'))
-        is_last_line = (i == len(lines) - 1)
-        
-        if ends_with_punctuation or is_last_line:
+
+        is_heading = (
+            (line.isupper() and len(words_in_line) <= 10) or
+            (len(words_in_line) <= 6 and line[0].isupper() and line.endswith(':'))
+        )
+
+        if is_heading:
             if current_paragraph:
                 paragraph_text = ' '.join(current_paragraph)
                 paragraph_text = re.sub(r'\s+', ' ', paragraph_text)
+                paragraph_text = re.sub(r'\s+([.,!?;:])', r'\1', paragraph_text)
                 paragraphs.append(paragraph_text.strip())
                 current_paragraph = []
-    
-    return '\n\n'.join(paragraphs) if paragraphs else text
+            paragraphs.append(f"\n🔹 {line}\n")
+            continue
 
-def create_smart_chunks(text, chunk_size=500, overlap=100):
+        is_list_item = re.match(r'^[\d]+[\.\)]\s', line) or re.match(r'^[•\-\*]\s', line)
+        if is_list_item:
+            if current_paragraph:
+                paragraph_text = ' '.join(current_paragraph)
+                paragraph_text = re.sub(r'\s+', ' ', paragraph_text)
+                paragraph_text = re.sub(r'\s+([.,!?;:])', r'\1', paragraph_text)
+                paragraphs.append(paragraph_text.strip())
+                current_paragraph = []
+            paragraphs.append(f"  {line}")
+            continue
+
+        current_paragraph.append(line)
+        ends_with_punctuation = line.endswith(('.', '!', '?', '؟', '!', '。'))
+        next_is_new_section = False
+        if i < len(lines) - 1:
+            next_line = lines[i + 1]
+            next_words = next_line.split()
+            next_is_new_section = (
+                re.match(r'^[\d]+[\.\)]\s', next_line) or
+                re.match(r'^[•\-\*]\s', next_line) or
+                (len(next_words) <= 6 and next_line[0].isupper()) or
+                next_line.isupper()
+            )
+        is_last_line = (i == len(lines) - 1)
+        if (ends_with_punctuation or next_is_new_section or is_last_line):
+            if current_paragraph:
+                paragraph_text = ' '.join(current_paragraph)
+                paragraph_text = re.sub(r'\s+', ' ', paragraph_text)
+                paragraph_text = re.sub(r'\s+([.,!?;:])', r'\1', paragraph_text)
+                paragraph_text = re.sub(r'([.,!?;:])\s*([.,!?;:])', r'\1', paragraph_text)
+                paragraphs.append(paragraph_text.strip())
+                current_paragraph = []
+
+    if paragraphs:
+        structured_text = ""
+        for para in paragraphs:
+            if para.startswith('\n🔹'):
+                structured_text += para
+            elif para.startswith('  '):
+                structured_text += para + "\n"
+            else:
+                structured_text += para + "\n\n"
+        return structured_text.strip()
+
+    return text
+
+def create_smart_chunks(text, chunk_size=700, overlap=200):
     words = text.split()
     chunks = []
     if len(words) <= chunk_size:
@@ -102,7 +158,7 @@ def create_smart_chunks(text, chunk_size=500, overlap=100):
     for i in range(0, len(words), chunk_size - overlap):
         chunk_words = words[i:i + chunk_size]
         chunk = " ".join(chunk_words)
-        if len(chunk.split()) >= 20:
+        if len(chunk.split()) >= 30:
             chunks.append(chunk)
     return chunks
 
@@ -110,17 +166,23 @@ def format_table_as_structured_text(extracted_table, table_number=None):
     if not extracted_table or len(extracted_table) == 0:
         return ""
     headers = [str(cell).strip() if cell else "" for cell in extracted_table[0]]
-    headers = [clean_text(h) if h else f"عمود_{i+1}" for i, h in enumerate(headers)]
-    
+    headers = [clean_text(h) if h else f"Column_{i+1}" for i, h in enumerate(headers)]
+    if not headers:
+        return ""
     formatted_lines = []
     if table_number:
-        formatted_lines.append(f"\n📊 جدول رقم {table_number}\n{'─' * 50}")
+        formatted_lines.append(f"\n┌{'─' * 58}┐")
+        formatted_lines.append(f"│  📊 جدول رقم {table_number}{' ' * (54 - len(str(table_number)))}│")
+        formatted_lines.append(f"└{'─' * 58}┘\n")
     else:
-        formatted_lines.append(f"\n📊 جدول\n{'─' * 50}")
-    
-    formatted_lines.append("\n📋 الأعمدة: " + " | ".join(headers))
-    formatted_lines.append("\n" + "─" * 50)
-    
+        formatted_lines.append(f"\n┌{'─' * 58}┐")
+        formatted_lines.append(f"│  📊 جدول{' ' * 50}│")
+        formatted_lines.append(f"└{'─' * 58}┘\n")
+    formatted_lines.append("📋 أعمدة الجدول:")
+    for idx, header in enumerate(headers, 1):
+        formatted_lines.append(f"   {idx}. {header}")
+    formatted_lines.append(f"\n{'─' * 60}\n")
+    formatted_lines.append("📊 بيانات الجدول:\n")
     row_count = 0
     for row_idx, row in enumerate(extracted_table[1:], 1):
         row_cells = [str(cell).strip() if cell else "" for cell in row]
@@ -128,19 +190,31 @@ def format_table_as_structured_text(extracted_table, table_number=None):
         if not any(row_cells):
             continue
         row_count += 1
-        formatted_lines.append(f"\nصف {row_count}:")
+        formatted_lines.append(f"▸ الصف رقم {row_count}:")
         for header, value in zip(headers, row_cells):
             if value:
                 formatted_lines.append(f"  • {header}: {value}")
-    
-    formatted_lines.append("\n" + "─" * 50 + "\n")
+            else:
+                formatted_lines.append(f"  • {header}: [فارغ]")
+        formatted_lines.append("")
+    formatted_lines.append(f"{'─' * 60}")
+    formatted_lines.append(f"📈 ملخص: الجدول يحتوي على {row_count} صف و {len(headers)} عمود")
+    formatted_lines.append(f"{'─' * 60}\n")
     return "\n".join(formatted_lines)
 
 def extract_and_structure_text_from_image(image):
-    raw_text = pytesseract.image_to_string(image, lang='eng+ara')
+    raw_text = pytesseract.image_to_string(image, lang='eng+ara+deu')
     if not raw_text.strip():
         return ""
     structured_text = structure_text_into_paragraphs(raw_text)
+    if structured_text:
+        has_table_structure = (
+            '|' in structured_text or
+            '\t' in structured_text or
+            re.search(r'\d+\s+\w+\s+\d+', structured_text)
+        )
+        if has_table_structure:
+            structured_text = "📊 [محتوى جدول من الصورة]\n\n" + structured_text
     return structured_text
 
 def extract_pdf_detailed(file):
@@ -200,7 +274,7 @@ def extract_pdf_detailed(file):
                             all_elements.append({
                                 'type': 'image',
                                 'y_position': img_rect.y0,
-                                'content': f"\n╔{'═' * 58}╗\n║  📷 صورة {img_index + 1} (أبعاد: {width}x{height}){' ' * (34 - len(str(width)) - len(str(height)))}║\n╚{'═' * 58}╝\n\n{structured_text}"
+                                'content': f"\n╔{'═' * 58}╗\n║  📷 محتوى مستخرج من صورة (أبعاد: {width}x{height}){' ' * (20 - len(str(width)) - len(str(height)))}║\n╚{'═' * 58}╝\n\n{structured_text}\n"
                             })
         
         # Extract tables
@@ -224,12 +298,12 @@ def extract_pdf_detailed(file):
         all_elements.sort(key=lambda x: x['y_position'])
         
         # Build page text
-        page_text = f"\n{'═' * 60}\n📄 صفحة {page_num + 1}\n{'═' * 60}\n\n"
+        page_text = f"\n{'═' * 60}\n📄 صفحة رقم {page_num + 1}\n{'═' * 60}\n\n"
         for element in all_elements:
             page_text += element['content'] + "\n\n"
         
         # Create chunks for this page
-        page_chunks = create_smart_chunks(page_text, chunk_size=500, overlap=100)
+        page_chunks = create_smart_chunks(page_text, chunk_size=1500, overlap=250)
         file_info['chunks'].extend(page_chunks)
     
     doc.close()
@@ -248,8 +322,9 @@ def extract_docx_detailed(file):
     }
     
     all_text = []
+    table_counter = 0
     
-    # Extract paragraphs and tables
+    # Extract paragraphs and tables in order
     for element in doc.element.body:
         if element.tag.endswith('p'):
             for para in doc.paragraphs:
@@ -257,22 +332,24 @@ def extract_docx_detailed(file):
                     text = clean_text(para.text)
                     if text:
                         structured = structure_text_into_paragraphs(text)
-                        all_text.append(structured)
+                        if structured:
+                            all_text.append(structured)
                     break
         elif element.tag.endswith('tbl'):
             for table in doc.tables:
                 if table._element == element:
                     file_info['total_tables'] += 1
+                    table_counter += 1
                     table_text = format_table_as_structured_text(
                         [[cell.text for cell in row.cells] for row in table.rows],
-                        file_info['total_tables']
+                        table_counter
                     )
                     if table_text:
                         all_text.append(table_text)
                     break
     
     complete_text = "\n\n".join(all_text)
-    file_info['chunks'] = create_smart_chunks(complete_text, chunk_size=500, overlap=100)
+    file_info['chunks'] = create_smart_chunks(complete_text, chunk_size=1500, overlap=250)
     
     if file_info['total_tables'] > 0:
         file_info['pages_with_tables'] = [1]
@@ -284,7 +361,7 @@ def extract_txt_detailed(file):
     structured_text = structure_text_into_paragraphs(text)
     
     file_info = {
-        'chunks': create_smart_chunks(structured_text, chunk_size=500, overlap=100),
+        'chunks': create_smart_chunks(structured_text, chunk_size=1500, overlap=250),
         'total_pages': 1,
         'total_tables': 0,
         'total_images': 0,
