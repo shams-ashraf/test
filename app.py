@@ -161,6 +161,8 @@ def extract_pdf_text(file_path):
             image_bytes = base_image["image"]
             image = Image.open(io.BytesIO(image_bytes))
             if image.width >= MIN_WIDTH and image.height >= MIN_HEIGHT:
+                img_path = os.path.join(OUTPUT_FOLDER, f"page{page_num+1}_img{img_index+1}.png")
+                image.save(img_path)
                 img_text = extract_and_structure_text_from_image(image)
                 if img_text.strip():
                     if '📊' in img_text:
@@ -240,15 +242,11 @@ def main():
     # Sidebar
     with st.sidebar:
         st.header("⚙️ Settings")
-        st.info("Upload documents to process and generate embeddings")
+        st.info("Processing documents from './Documents' folder")
         
-        uploaded_files = st.file_uploader(
-            "Upload Documents",
-            type=['pdf', 'docx', 'doc', 'txt'],
-            accept_multiple_files=True
-        )
+        st.write(f"📁 Folder: `{DOCUMENTS_FOLDER}`")
         
-        if st.button("🔄 Process All Documents in Folder"):
+        if st.button("🔄 Process All Documents", type="primary", use_container_width=True):
             st.session_state['process_folder'] = True
     
     # Main content
@@ -261,58 +259,16 @@ def main():
     with col1:
         st.subheader("📑 Processed Documents")
         
-        if uploaded_files:
-            all_chunks = []
-            
-            for uploaded_file in uploaded_files:
-                with st.expander(f"📄 {uploaded_file.name}", expanded=True):
-                    # Save uploaded file temporarily
-                    file_path = os.path.join(DOCUMENTS_FOLDER, uploaded_file.name)
-                    with open(file_path, "wb") as f:
-                        f.write(uploaded_file.getbuffer())
-                    
-                    with st.spinner(f"Processing {uploaded_file.name}..."):
-                        chunks, tables_count = process_document(file_path)
-                        all_chunks.extend(chunks)
-                    
-                    st.success(f"✅ Extracted {len(chunks)} chunks")
-                    st.info(f"📊 Detected {tables_count} tables")
-                    
-                    # Display chunks
-                    for idx, chunk in enumerate(chunks, 1):
-                        with st.container():
-                            st.markdown(f"**Chunk {idx}**")
-                            
-                            # Check if it's a table
-                            if "📊" in chunk or "┌─" in chunk:
-                                st.code(chunk, language=None)
-                            else:
-                                st.text_area(
-                                    f"Content {idx}",
-                                    chunk,
-                                    height=200,
-                                    key=f"{uploaded_file.name}_{idx}",
-                                    label_visibility="collapsed"
-                                )
-                            st.markdown("---")
-            
-            # Update statistics
-            with stats_placeholder.container():
-                st.metric("Total Files", len(uploaded_files))
-                st.metric("Total Chunks", len(all_chunks))
-                
-            # Generate embeddings button
-            if st.button("🚀 Generate Embeddings", type="primary"):
-                with st.spinner("Generating embeddings..."):
-                    collection = embed_chunks(all_chunks)
-                    st.success("✅ Embeddings generated successfully!")
-                    st.balloons()
+        # Auto-process on load or button click
+        if 'process_folder' not in st.session_state:
+            st.session_state['process_folder'] = True
         
-        elif 'process_folder' in st.session_state and st.session_state['process_folder']:
+        if st.session_state.get('process_folder', False):
             all_files = [os.path.join(DOCUMENTS_FOLDER, f) for f in os.listdir(DOCUMENTS_FOLDER) if f.split('.')[-1].lower() in ['pdf', 'docx', 'doc', 'txt']]
             
             if not all_files:
                 st.warning("⚠️ No documents found in the Documents folder!")
+                st.info("Please add PDF, DOCX, DOC, or TXT files to the './Documents' folder")
             else:
                 all_chunks = []
                 
@@ -350,15 +306,16 @@ def main():
                     st.metric("Total Chunks", len(all_chunks))
                 
                 # Generate embeddings
-                with st.spinner("Generating embeddings..."):
-                    collection = embed_chunks(all_chunks)
-                    st.success("✅ Embeddings generated successfully!")
-                    st.balloons()
+                if all_chunks:
+                    with st.spinner("Generating embeddings..."):
+                        collection = embed_chunks(all_chunks)
+                        st.success("✅ Embeddings generated successfully!")
+                        st.balloons()
                 
                 st.session_state['process_folder'] = False
         
         else:
-            st.info("👆 Upload documents using the sidebar or process existing documents in the folder")
+            st.info("👆 Click 'Process All Documents' button in the sidebar to start")
 
 if __name__ == "__main__":
     main()
