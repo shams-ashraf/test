@@ -10,7 +10,7 @@ import uuid
 from sentence_transformers import SentenceTransformer
 import chromadb
 from chromadb.utils import embedding_functions
-from groq import Groq
+import glob
 
 # Configuration
 st.set_page_config(
