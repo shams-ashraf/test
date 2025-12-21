@@ -1,33 +1,61 @@
+import streamlit as st
 import os
 import re
+import fitz
 import io
-import fitz  # PyMuPDF
 import docx
 from PIL import Image
 import pytesseract
-from io import BytesIO
 import uuid
 from sentence_transformers import SentenceTransformer
 import chromadb
 from chromadb.utils import embedding_functions
-import streamlit as st
-import base64
 
-# OCR setup
-pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
+# Configuration
+st.set_page_config(
+    page_title="مستخرج المستندات الذكي",
+    page_icon="📄",
+    layout="wide"
+)
 
-# Settings
-DOCUMENTS_FOLDER = "./documents"
-MIN_WIDTH = 40
-MIN_HEIGHT = 40
-OUTPUT_FOLDER = "extracted_images"
-os.makedirs(OUTPUT_FOLDER, exist_ok=True)
-os.makedirs(DOCUMENTS_FOLDER, exist_ok=True)
+# Custom CSS
+st.markdown("""
+<style>
+    .main-header {
+        text-align: center;
+        padding: 2rem 0;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border-radius: 10px;
+        margin-bottom: 2rem;
+    }
+    .chunk-card {
+        background: #f8f9fa;
+        padding: 1.5rem;
+        border-radius: 10px;
+        border-right: 4px solid #667eea;
+        margin-bottom: 1rem;
+    }
+    .stats-box {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 1rem;
+        border-radius: 8px;
+        text-align: center;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-# Text cleaning
+# Initialize session state
+if 'processed' not in st.session_state:
+    st.session_state.processed = False
+    st.session_state.all_chunks = []
+    st.session_state.collection = None
+    st.session_state.total_tables = 0
+
+# Helper Functions (simplified versions from your code)
 def clean_text(text):
     text = re.sub(r'\s+', ' ', text)
-    text = '\n'.join([line.strip() for line in text.split('\n') if line.strip()])
     return text.strip()
 
 def structure_text_into_paragraphs(text):
@@ -35,76 +63,7 @@ def structure_text_into_paragraphs(text):
         return ""
     text = clean_text(text)
     lines = [line.strip() for line in text.split('\n') if line.strip()]
-    if not lines:
-        return ""
-    paragraphs = []
-    current_paragraph = []
-    for i, line in enumerate(lines):
-        words_in_line = line.split()
-        if len(words_in_line) < 3 and not (line[0].isupper() or re.match(r'^[\d]+[\.\):]', line)):
-            continue
-        is_heading = (
-            (line.isupper() and len(words_in_line) <= 10) or
-            (len(words_in_line) <= 6 and line[0].isupper() and line.endswith(':'))
-        )
-        if is_heading:
-            if current_paragraph:
-                paragraph_text = ' '.join(current_paragraph)
-                paragraph_text = re.sub(r'\s+', ' ', paragraph_text)
-                paragraph_text = re.sub(r'\s+([.,!?;:])', r'\1', paragraph_text)
-                paragraphs.append(paragraph_text.strip())
-                current_paragraph = []
-            paragraphs.append(f"\n🔹 {line}\n")
-            continue
-        is_list_item = re.match(r'^[\d]+[\.\)]\s', line) or re.match(r'^[•\-\*]\s', line)
-        if is_list_item:
-            if current_paragraph:
-                paragraph_text = ' '.join(current_paragraph)
-                paragraph_text = re.sub(r'\s+', ' ', paragraph_text)
-                paragraph_text = re.sub(r'\s+([.,!?;:])', r'\1', paragraph_text)
-                paragraphs.append(paragraph_text.strip())
-                current_paragraph = []
-            paragraphs.append(f"  {line}")
-            continue
-        current_paragraph.append(line)
-        ends_with_punctuation = line.endswith(('.', '!', '?', '؟', '!', '。'))
-        next_is_new_section = False
-        if i < len(lines) - 1:
-            next_line = lines[i + 1]
-            next_words = next_line.split()
-            next_is_new_section = (
-                re.match(r'^[\d]+[\.\)]\s', next_line) or
-                re.match(r'^[•\-\*]\s', next_line) or
-                (len(next_words) <= 6 and next_line[0].isupper()) or
-                next_line.isupper()
-            )
-        is_last_line = (i == len(lines) - 1)
-        if (ends_with_punctuation or next_is_new_section or is_last_line):
-            if current_paragraph:
-                paragraph_text = ' '.join(current_paragraph)
-                paragraph_text = re.sub(r'\s+', ' ', paragraph_text)
-                paragraph_text = re.sub(r'\s+([.,!?;:])', r'\1', paragraph_text)
-                paragraph_text = re.sub(r'([.,!?;:])\s*([.,!?;:])', r'\1', paragraph_text)
-                paragraphs.append(paragraph_text.strip())
-                current_paragraph = []
-    structured_text = ""
-    for para in paragraphs:
-        if para.startswith('\n🔹'):
-            structured_text += para
-        elif para.startswith('  '):
-            structured_text += para + "\n"
-        else:
-            structured_text += para + "\n\n"
-    return structured_text.strip() if structured_text else text
-
-def extract_and_structure_text_from_image(image):
-    raw_text = pytesseract.image_to_string(image, lang='eng+ara+deu')
-    if not raw_text.strip():
-        return ""
-    structured_text = structure_text_into_paragraphs(raw_text)
-    if '|' in structured_text or '\t' in structured_text or re.search(r'\d+\s+\w+\s+\d+', structured_text):
-        structured_text = "📊 [Table content from image]\n\n" + structured_text
-    return structured_text
+    return '\n\n'.join(lines)
 
 def create_smart_chunks(text, chunk_size=700, overlap=200):
     words = text.split()
@@ -118,204 +77,166 @@ def create_smart_chunks(text, chunk_size=700, overlap=200):
             chunks.append(chunk)
     return chunks
 
-def extract_table_from_docx(table, table_number=None):
-    if len(table.rows) == 0:
-        return ""
-    headers = [clean_text(cell.text) for cell in table.rows[0].cells if cell.text.strip()]
-    if not headers:
-        return ""
-    formatted_lines = []
-    title = f"Table {table_number}" if table_number else "Table"
-    formatted_lines.append(f"\n┌{'─'*58}┐\n│  📊 {title}{' '*(54-len(title))}│\n└{'─'*58}┘\n")
-    formatted_lines.append("📋 Columns:")
-    for idx, header in enumerate(headers, 1):
-        formatted_lines.append(f"  {idx}. {header}")
-    formatted_lines.append(f"\n{'─'*60}\n📊 Data:\n")
-    row_count = 0
-    for row in table.rows[1:]:
-        cells = [clean_text(cell.text) for cell in row.cells]
-        if not any(cells):
-            continue
-        row_count += 1
-        formatted_lines.append(f"▸ Row {row_count}:")
-        for header, value in zip(headers, cells):
-            formatted_lines.append(f"  • {header}: {value if value else '[Empty]'}")
-        formatted_lines.append("")
-    formatted_lines.append(f"{'─'*60}\n📈 Summary: {row_count} rows, {len(headers)} columns\n{'─'*60}\n")
-    return "\n".join(formatted_lines)
-
-def extract_pdf_text(file_path):
-    chunks = []
-    tables_count = 0
-    doc = fitz.open(file_path)
-    for page_num, page in enumerate(doc):
+def extract_pdf_text(file):
+    doc = fitz.open(stream=file.read(), filetype="pdf")
+    all_text = []
+    for page in doc:
         text = page.get_text()
         if text.strip():
-            structured = structure_text_into_paragraphs(text)
-            page_chunks = create_smart_chunks(structured)
-            chunks.extend(page_chunks)
-        images = page.get_images(full=True)
-        for img_index, img in enumerate(images):
-            xref = img[0]
-            base_image = doc.extract_image(xref)
-            image_bytes = base_image["image"]
-            image = Image.open(io.BytesIO(image_bytes))
-            if image.width >= MIN_WIDTH and image.height >= MIN_HEIGHT:
-                img_path = os.path.join(OUTPUT_FOLDER, f"page{page_num+1}_img{img_index+1}.png")
-                image.save(img_path)
-                img_text = extract_and_structure_text_from_image(image)
-                if img_text.strip():
-                    if '📊' in img_text:
-                        tables_count += 1
-                    chunks.append(img_text)
+            all_text.append(text)
     doc.close()
-    return chunks, tables_count
+    complete_text = "\n\n".join(all_text)
+    return create_smart_chunks(complete_text, chunk_size=1500, overlap=250)
 
-def extract_docx_text(file_path):
-    chunks = []
-    tables_count = 0
-    doc = docx.Document(file_path)
-    full_text = []
+def extract_docx_text(file):
+    doc = docx.Document(file)
+    all_text = []
     for para in doc.paragraphs:
         if para.text.strip():
-            full_text.append(para.text)
-    if full_text:
-        combined_text = "\n".join(full_text)
-        structured = structure_text_into_paragraphs(combined_text)
-        text_chunks = create_smart_chunks(structured)
-        chunks.extend(text_chunks)
-    for idx, table in enumerate(doc.tables, 1):
-        table_text = extract_table_from_docx(table, idx)
-        if table_text.strip():
-            tables_count += 1
-            chunks.append(table_text)
-    return chunks, tables_count
+            all_text.append(para.text)
+    complete_text = "\n\n".join(all_text)
+    return create_smart_chunks(complete_text, chunk_size=1500, overlap=250)
 
-def extract_txt_text(file_path):
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-        text = f.read()
-    structured = structure_text_into_paragraphs(text)
-    chunks = create_smart_chunks(structured)
-    return chunks, 0
+def extract_txt_text(file):
+    text = file.read().decode('utf-8', errors='ignore')
+    return create_smart_chunks(text, chunk_size=1500, overlap=250)
 
-def process_document(file_path):
-    ext = file_path.split('.')[-1].lower()
-    if ext == 'pdf':
-        return extract_pdf_text(file_path)
-    elif ext in ['docx', 'doc']:
-        return extract_docx_text(file_path)
-    elif ext == 'txt':
-        return extract_txt_text(file_path)
-    else:
-        return [], 0
-
-def embed_chunks(chunks):
-    client = chromadb.Client()
-    collection_name = f"docs_{uuid.uuid4().hex[:8]}"
-    collection = client.create_collection(
-        name=collection_name,
-        embedding_function=embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name="intfloat/multilingual-e5-large"
-        )
+def get_embedding_function():
+    return embedding_functions.SentenceTransformerEmbeddingFunction(
+        model_name="intfloat/multilingual-e5-large"
     )
-    batch_size = 500
-    for i in range(0, len(chunks), batch_size):
-        batch = chunks[i:i+batch_size]
-        collection.add(
-            documents=batch,
-            ids=[f"chunk_{i+j}" for j in range(len(batch))],
-            metadatas=[{"source": "Document"} for j in range(len(batch))]
-        )
-    return collection
 
-# ============= Streamlit UI =============
-def main():
-    st.set_page_config(
-        page_title="Document Processor",
-        page_icon="📄",
-        layout="wide"
-    )
-    
-    st.title("📄 Document Processor & Embedding Generator")
+# Main UI
+st.markdown("""
+<div class="main-header">
+    <h1>📄 مستخرج المستندات الذكي</h1>
+    <p>ارفع ملفاتك واحصل على نتائج مهيكلة بشكل احترافي</p>
+</div>
+""", unsafe_allow_html=True)
+
+# File Upload
+uploaded_files = st.file_uploader(
+    "ارفع مستنداتك (PDF, DOCX, TXT)",
+    type=['pdf', 'docx', 'doc', 'txt'],
+    accept_multiple_files=True
+)
+
+if uploaded_files and st.button("🚀 ابدأ المعالجة", type="primary", use_container_width=True):
+    with st.spinner("جاري معالجة المستندات..."):
+        all_chunks = []
+        all_metadata = []
+        
+        # Create vector DB
+        client = chromadb.Client()
+        collection_name = f"docs_{uuid.uuid4().hex[:8]}"
+        collection = client.create_collection(
+            name=collection_name,
+            embedding_function=get_embedding_function()
+        )
+        
+        progress_bar = st.progress(0)
+        
+        for idx, file in enumerate(uploaded_files):
+            file_ext = file.name.split('.')[-1].lower()
+            
+            # Extract text based on file type
+            if file_ext == 'pdf':
+                chunks = extract_pdf_text(file)
+            elif file_ext in ['docx', 'doc']:
+                chunks = extract_docx_text(file)
+            elif file_ext == 'txt':
+                chunks = extract_txt_text(file)
+            else:
+                continue
+            
+            # Add to collection
+            for chunk in chunks:
+                all_chunks.append(chunk)
+                all_metadata.append({"source": file.name})
+            
+            progress_bar.progress((idx + 1) / len(uploaded_files))
+        
+        # Batch insert into Chroma
+        batch_size = 500
+        for i in range(0, len(all_chunks), batch_size):
+            batch = all_chunks[i:i+batch_size]
+            metadata_batch = all_metadata[i:i+batch_size]
+            collection.add(
+                documents=batch,
+                ids=[f"chunk_{i+j}" for j in range(len(batch))],
+                metadatas=metadata_batch
+            )
+        
+        st.session_state.all_chunks = all_chunks
+        st.session_state.collection = collection
+        st.session_state.processed = True
+        st.success("✅ تمت المعالجة بنجاح!")
+
+# Display Results
+if st.session_state.processed:
     st.markdown("---")
     
-    # Sidebar
-    with st.sidebar:
-        st.header("⚙️ Settings")
-        st.info("Processing documents from './Documents' folder")
-        
-        st.write(f"📁 Folder: `{DOCUMENTS_FOLDER}`")
-        
-        if st.button("🔄 Process All Documents", type="primary", use_container_width=True):
-            st.session_state['process_folder'] = True
-    
-    # Main content
-    col1, col2 = st.columns([2, 1])
+    # Statistics
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown(f"""
+        <div class="stats-box">
+            <h2>{len(st.session_state.all_chunks)}</h2>
+            <p>إجمالي القطع المستخرجة</p>
+        </div>
+        """, unsafe_allow_html=True)
     
     with col2:
-        st.subheader("📊 Statistics")
-        stats_placeholder = st.empty()
+        total_words = sum(len(chunk.split()) for chunk in st.session_state.all_chunks)
+        st.markdown(f"""
+        <div class="stats-box">
+            <h2>{total_words:,}</h2>
+            <p>إجمالي الكلمات</p>
+        </div>
+        """, unsafe_allow_html=True)
     
-    with col1:
-        st.subheader("📑 Processed Documents")
+    with col3:
+        avg_chunk_size = total_words // len(st.session_state.all_chunks) if st.session_state.all_chunks else 0
+        st.markdown(f"""
+        <div class="stats-box">
+            <h2>{avg_chunk_size}</h2>
+            <p>متوسط حجم القطعة</p>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    st.markdown("---")
+    
+    # Search Functionality
+    st.subheader("🔍 البحث في المستندات")
+    query = st.text_input("ابحث عن محتوى معين...")
+    
+    if query:
+        results = st.session_state.collection.query(
+            query_texts=[query],
+            n_results=5
+        )
         
-        # Auto-process on load or button click
-        if 'process_folder' not in st.session_state:
-            st.session_state['process_folder'] = True
-        
-        if st.session_state.get('process_folder', False):
-            all_files = [os.path.join(DOCUMENTS_FOLDER, f) for f in os.listdir(DOCUMENTS_FOLDER) if f.split('.')[-1].lower() in ['pdf', 'docx', 'doc', 'txt']]
-            
-            if not all_files:
-                st.warning("⚠️ No documents found in the Documents folder!")
-                st.info("Please add PDF, DOCX, DOC, or TXT files to the './Documents' folder")
-            else:
-                all_chunks = []
-                
-                for file_path in all_files:
-                    file_name = os.path.basename(file_path)
-                    with st.expander(f"📄 {file_name}", expanded=True):
-                        with st.spinner(f"Processing {file_name}..."):
-                            chunks, tables_count = process_document(file_path)
-                            all_chunks.extend(chunks)
-                        
-                        st.success(f"✅ Extracted {len(chunks)} chunks")
-                        st.info(f"📊 Detected {tables_count} tables")
-                        
-                        # Display chunks
-                        for idx, chunk in enumerate(chunks, 1):
-                            with st.container():
-                                st.markdown(f"**Chunk {idx}**")
-                                
-                                # Check if it's a table
-                                if "📊" in chunk or "┌─" in chunk:
-                                    st.code(chunk, language=None)
-                                else:
-                                    st.text_area(
-                                        f"Content {idx}",
-                                        chunk,
-                                        height=200,
-                                        key=f"{file_name}_{idx}",
-                                        label_visibility="collapsed"
-                                    )
-                                st.markdown("---")
-                
-                # Update statistics
-                with stats_placeholder.container():
-                    st.metric("Total Files", len(all_files))
-                    st.metric("Total Chunks", len(all_chunks))
-                
-                # Generate embeddings
-                if all_chunks:
-                    with st.spinner("Generating embeddings..."):
-                        collection = embed_chunks(all_chunks)
-                        st.success("✅ Embeddings generated successfully!")
-                        st.balloons()
-                
-                st.session_state['process_folder'] = False
-        
-        else:
-            st.info("👆 Click 'Process All Documents' button in the sidebar to start")
+        st.markdown("### نتائج البحث:")
+        for idx, chunk in enumerate(results["documents"][0], 1):
+            with st.expander(f"📄 نتيجة {idx}"):
+                st.markdown(f'<div class="chunk-card">{chunk}</div>', unsafe_allow_html=True)
+    
+    # Display All Chunks
+    st.markdown("---")
+    st.subheader("📚 جميع القطع المستخرجة")
+    
+    # Pagination
+    chunks_per_page = 10
+    total_pages = (len(st.session_state.all_chunks) + chunks_per_page - 1) // chunks_per_page
+    
+    page = st.selectbox("اختر الصفحة", range(1, total_pages + 1))
+    
+    start_idx = (page - 1) * chunks_per_page
+    end_idx = start_idx + chunks_per_page
+    
+    for idx, chunk in enumerate(st.session_state.all_chunks[start_idx:end_idx], start_idx + 1):
+        with st.expander(f"📄 القطعة رقم {idx}"):
+            st.markdown(f'<div class="chunk-card">{chunk}</div>', unsafe_allow_html=True)
 
-if __name__ == "__main__":
-    main()
+else:
+    st.info("👆 ارفع ملفاتك للبدء")
