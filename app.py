@@ -17,7 +17,7 @@ import base64
 pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
 # Settings
-DOCUMENTS_FOLDER = "./Documents"
+DOCUMENTS_FOLDER = "./documents"
 MIN_WIDTH = 40
 MIN_HEIGHT = 40
 OUTPUT_FOLDER = "extracted_images"
