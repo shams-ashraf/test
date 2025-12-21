@@ -14,7 +14,7 @@ from chromadb.utils import embedding_functions
 pytesseract.pytesseract.tesseract_cmd = "/usr/bin/tesseract"
 
 # Settings
-DOCUMENTS_FOLDER = "./Documents"
+DOCUMENTS_FOLDER = "./documents"
 OUTPUT_FOLDER = "extracted_images"
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
