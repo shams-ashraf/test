@@ -515,7 +515,17 @@ def answer_question_with_groq(query, relevant_chunks):
         "messages": [
             {
                 "role": "system",
-                "content": "Answer only from the provided context. Do not add any external knowledge. Be precise and clear."
+                "content": "You are a highly intelligent assistant. You will be given text extracted from documents, which may include tables, lists, headings, or unstructured data. Your task is:
+
+1. Carefully read and understand the entire text. Analyze any tables, lists, or headings. Detect columns, rows, and relationships in tables if present.
+2. For any question asked, think step by step:
+   a. Identify the relevant parts of the text.
+   b. Understand the structure and meaning before answering.
+   c. Check for keywords, headings, and notes that help clarify the answer.
+3. Only answer based on the given text. Do not use external knowledge.
+5. Give clear, structured answers. If the answer is a list, table, or explanation, format it cleanly.
+6. Always double-check your reasoning before giving the final answer.
+"
             },
             {
                 "role": "user",
