@@ -3,7 +3,6 @@ import re
 import fitz
 import io
 import docx
-import pytesseract
 import uuid
 import glob
 from sentence_transformers import SentenceTransformer
@@ -12,11 +11,11 @@ from chromadb.utils import embedding_functions
 import requests
 import json
 from datetime import datetime
-from langdetect import detect
 from io import BytesIO
-from PIL import Image
 import os
 import time
+import pickle
+import hashlib
 
 # Configuration
 st.set_page_config(
@@ -58,13 +57,6 @@ st.markdown("""
         border-radius: 10px;
         margin: 1rem 0;
     }
-    .image-display {
-        border: 2px solid #667eea;
-        border-radius: 8px;
-        padding: 10px;
-        margin: 15px 0;
-        background: #f0f4ff;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -77,107 +69,53 @@ if 'processed' not in st.session_state:
 MIN_WIDTH = 40
 MIN_HEIGHT = 40
 
-# Groq Configuration
+# Configuration
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = "llama-3.3-70b-versatile"
+PDF_PASSWORD = os.getenv("PDF_PASSWORD", "")
+DOCS_FOLDER = os.getenv("DOCS_FOLDER", "./documents")
+CACHE_FOLDER = os.getenv("CACHE_FOLDER", "./cache")
+
+# Create folders if not exist
+os.makedirs(DOCS_FOLDER, exist_ok=True)
+os.makedirs(CACHE_FOLDER, exist_ok=True)
 
 if not GROQ_API_KEY:
     st.error("⚠️ GROQ_API_KEY not found in environment variables!")
 
 # Helper Functions
+def get_file_hash(filepath):
+    """Get MD5 hash of file for caching"""
+    hash_md5 = hashlib.md5()
+    with open(filepath, "rb") as f:
+        for chunk in iter(lambda: f.read(4096), b""):
+            hash_md5.update(chunk)
+    return hash_md5.hexdigest()
+
+def load_cache(cache_key):
+    """Load processed data from cache"""
+    cache_file = os.path.join(CACHE_FOLDER, f"{cache_key}.pkl")
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, 'rb') as f:
+                return pickle.load(f)
+        except:
+            return None
+    return None
+
+def save_cache(cache_key, data):
+    """Save processed data to cache"""
+    cache_file = os.path.join(CACHE_FOLDER, f"{cache_key}.pkl")
+    try:
+        with open(cache_file, 'wb') as f:
+            pickle.dump(data, f)
+    except Exception as e:
+        st.warning(f"⚠️ Could not save cache: {str(e)}")
+
 def clean_text(text):
     text = re.sub(r'\s+', ' ', text)
     text = '\n'.join([line.strip() for line in text.split('\n') if line.strip()])
     return text.strip()
-
-def detect_table_structure_in_image(image):
-    """Enhanced table detection in images using OCR data analysis"""
-    try:
-        # Get detailed OCR data with bounding boxes
-        ocr_data = pytesseract.image_to_data(image, lang='eng+ara', output_type=pytesseract.Output.DICT)
-        
-        # Analyze vertical and horizontal alignment
-        x_positions = {}
-        y_positions = {}
-        
-        for i, text in enumerate(ocr_data['text']):
-            if text.strip():
-                x = ocr_data['left'][i]
-                y = ocr_data['top'][i]
-                
-                # Group by approximate x positions (columns)
-                x_key = round(x / 20) * 20
-                if x_key not in x_positions:
-                    x_positions[x_key] = []
-                x_positions[x_key].append(text)
-                
-                # Group by approximate y positions (rows)
-                y_key = round(y / 15) * 15
-                if y_key not in y_positions:
-                    y_positions[y_key] = []
-                y_positions[y_key].append(text)
-        
-        # Table detection criteria
-        has_multiple_columns = len(x_positions) >= 2
-        has_multiple_rows = len(y_positions) >= 2
-        has_aligned_structure = has_multiple_columns and has_multiple_rows
-        
-        return has_aligned_structure, x_positions, y_positions
-    except:
-        return False, {}, {}
-
-def extract_table_from_image(image):
-    """Extract structured table data from image using DBSCAN clustering."""
-    try:
-        # OCR مع bounding boxes
-        ocr_data = pytesseract.image_to_data(image, lang='eng+ara', output_type=pytesseract.Output.DICT)
-        
-        words = []
-        for i, text in enumerate(ocr_data['text']):
-            if text.strip():
-                x = ocr_data['left'][i]
-                y = ocr_data['top'][i]
-                w = ocr_data['width'][i]
-                h = ocr_data['height'][i]
-                words.append({
-                    "text": text.strip(),
-                    "x": x + w/2,  # مركز الكلمة
-                    "y": y + h/2
-                })
-
-        if not words:
-            return None
-
-        # تحويل للإحداثيات numpy
-        x_coords = np.array([w['x'] for w in words]).reshape(-1, 1)
-        y_coords = np.array([w['y'] for w in words]).reshape(-1, 1)
-
-        # تجميع الأعمدة (x) وصفوف (y) باستخدام DBSCAN
-        x_labels = DBSCAN(eps=15, min_samples=1).fit_predict(x_coords)
-        y_labels = DBSCAN(eps=12, min_samples=1).fit_predict(y_coords)
-
-        # ترتيب الأعمدة والصفوف
-        unique_x = sorted(np.unique(x_labels))
-        unique_y = sorted(np.unique(y_labels))
-
-        table_data = []
-        for y_lab in unique_y:
-            row = []
-            for x_lab in unique_x:
-                # الكلمات في هذا الصف والعمود
-                cell_words = [w['text'] for w, xl, yl in zip(words, x_labels, y_labels) if xl == x_lab and yl == y_lab]
-                row.append(" ".join(cell_words).strip())
-            if any(row):
-                table_data.append(row)
-
-        # شرط للتأكد أنه جدول فعلي
-        if len(table_data) > 1 and len(table_data[0]) > 1:
-            return table_data
-        return None
-
-    except Exception as e:
-        print("Error extracting table:", e)
-        return None
 
 def structure_text_into_paragraphs(text):
     if not text or not text.strip():
@@ -330,33 +268,23 @@ def format_table_as_structured_text(extracted_table, table_number=None):
     
     return "\n".join(formatted_lines)
 
-def extract_and_structure_text_from_image(image, page_num, img_index):
-    """Enhanced image text extraction with table detection"""
-    width, height = image.size
-    
-    # First check if image contains a table structure
-    table_data = extract_table_from_image(image)
-    
-    if table_data:
-        # Image contains a table - format it as structured table
-        table_text = format_table_as_structured_text(table_data)
-        return f"\n╔{'═' * 58}╗\n║ 📊 Table extracted from image (Page {page_num}, Image {img_index}){' ' * 10}║\n║ Dimensions: {width}x{height}px{' ' * (45 - len(str(width)) - len(str(height)))}║\n╚{'═' * 58}╝\n\n{table_text}\n"
-    
-    # Not a table - extract as regular text
-    raw_text = pytesseract.image_to_string(image, lang='eng+ara+deu')
-    
-    if not raw_text.strip():
-        return ""
-    
-    structured_text = structure_text_into_paragraphs(raw_text)
-    
-    if structured_text:
-        return f"\n╔{'═' * 58}╗\n║ 📷 Content extracted from image (Page {page_num}, Image {img_index}){' ' * 8}║\n║ Dimensions: {width}x{height}px{' ' * (45 - len(str(width)) - len(str(height)))}║\n╚{'═' * 58}╝\n\n{structured_text}\n"
-    
-    return ""
-
-def extract_pdf_detailed(file):
-    doc = fitz.open(stream=file.read(), filetype="pdf")
+def extract_pdf_detailed(filepath):
+    """Extract PDF with password support"""
+    try:
+        doc = fitz.open(filepath)
+        
+        # Check if PDF is encrypted
+        if doc.is_encrypted:
+            if PDF_PASSWORD:
+                # Try to authenticate with password
+                if not doc.authenticate(PDF_PASSWORD):
+                    doc.close()
+                    return None, "❌ Invalid PDF password"
+            else:
+                doc.close()
+                return None, "❌ PDF is password-protected but no password provided"
+    except Exception as e:
+        return None, f"❌ Error opening PDF: {str(e)}"
     
     file_info = {
         'chunks': [],
@@ -390,38 +318,6 @@ def extract_pdf_detailed(file):
                         'y_position': y_pos,
                         'content': structured_content
                     })
-        
-        # Extract images with enhanced OCR
-        images = page.get_images(full=True)
-        if images:
-            file_info['pages_with_images'].append(page_num + 1)
-            file_info['total_images'] += len(images)
-            
-            for img_index, img in enumerate(images, 1):
-                xref = img[0]
-                img_rects = page.get_image_rects(xref)
-                
-                if img_rects:
-                    img_rect = img_rects[0]
-                    base_image = doc.extract_image(xref)
-                    image_bytes = base_image["image"]
-                    image = Image.open(io.BytesIO(image_bytes))
-                    
-                    width, height = image.size
-                    
-                    if width >= MIN_WIDTH and height >= MIN_HEIGHT:
-                        structured_text = extract_and_structure_text_from_image(
-                            image, 
-                            page_num + 1, 
-                            img_index
-                        )
-                        
-                        if structured_text:
-                            all_elements.append({
-                                'type': 'image',
-                                'y_position': img_rect.y0,
-                                'content': structured_text
-                            })
         
         # Extract tables
         tables = page.find_tables()
@@ -458,10 +354,11 @@ def extract_pdf_detailed(file):
         file_info['chunks'].extend(page_chunks)
     
     doc.close()
-    return file_info
+    return file_info, None
 
-def extract_docx_detailed(file):
-    doc = docx.Document(file)
+def extract_docx_detailed(filepath):
+    """Extract DOCX from file path"""
+    doc = docx.Document(filepath)
     
     file_info = {
         'chunks': [],
@@ -506,10 +403,12 @@ def extract_docx_detailed(file):
     if file_info['total_tables'] > 0:
         file_info['pages_with_tables'] = [1]
     
-    return file_info
+    return file_info, None
 
-def extract_txt_detailed(file):
-    text = file.read().decode('utf-8', errors='ignore')
+def extract_txt_detailed(filepath):
+    """Extract TXT from file path"""
+    with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+        text = f.read()
     structured_text = structure_text_into_paragraphs(text)
     
     file_info = {
@@ -521,7 +420,15 @@ def extract_txt_detailed(file):
         'pages_with_images': []
     }
     
-    return file_info
+    return file_info, None
+
+def get_files_from_folder():
+    """Get all supported files from documents folder"""
+    supported_extensions = ['*.pdf', '*.docx', '*.doc', '*.txt']
+    files = []
+    for ext in supported_extensions:
+        files.extend(glob.glob(os.path.join(DOCS_FOLDER, ext)))
+    return files
 
 def get_embedding_function():
     return embedding_functions.SentenceTransformerEmbeddingFunction(
@@ -539,24 +446,55 @@ def answer_question_with_groq(query, relevant_chunks):
         "messages": [
             {
                 "role": "system",
-                "content": """You are a highly intelligent assistant. You will be given text extracted from documents, which may include tables, lists, headings, or unstructured data. Your task is:
+                "content": """You are a precise document analysis assistant. Follow these strict rules:
 
-                    1. Carefully read and understand the entire text. Analyze any tables, lists, or headings. Detect columns, rows, and relationships in tables if present.
-                    2. For any question asked, think step by step:
-                       a. Identify the relevant parts of the text.
-                       b. Understand the structure and meaning before answering.
-                       c. Check for keywords, headings, and notes that help clarify the answer.
-                    3. Only answer based on the given text. Do not use external knowledge.
-                    5. Give clear, structured answers. If the answer is a list, table, or explanation, format it cleanly.
-                    6. Always double-check your reasoning before giving the final answer.
-                    """
+CRITICAL RULES - NO EXCEPTIONS:
+1. ONLY use information EXPLICITLY stated in the provided context
+2. NEVER make assumptions or add external knowledge
+3. NEVER invent, estimate, or guess information
+4. If the exact answer is NOT in the context, say: "المعلومة المطلوبة غير موجودة في المستندات المتاحة"
+5. Quote exact numbers, dates, names, and values from the context when answering
+
+ANSWERING PROCESS:
+Step 1: Read the entire context carefully
+Step 2: Identify if the question can be answered from the context
+Step 3: If YES - extract the EXACT information and cite it
+Step 4: If NO - clearly state the information is not available
+
+FOR TABLES:
+- Read table structure carefully (headers and rows)
+- Match question keywords with exact column names
+- Extract data from the correct row and column
+- Double-check numbers and values before responding
+
+FOR LISTS AND STRUCTURED DATA:
+- Identify headers, bullet points, and numbered items
+- Match question requirements with available data
+- Preserve exact formatting when relevant
+
+ACCURACY CHECKLIST:
+✓ Is this information explicitly in the context?
+✓ Am I using exact values from the source?
+✓ Am I making any assumptions?
+✓ Can I point to the specific part of the text?
+
+Remember: It's better to say "not found" than to provide incorrect information."""
             },
             {
                 "role": "user",
-                "content": f"Context:\n{context}\n\nQuestion:\n{query}"
+                "content": f"""Context from documents:
+{context}
+
+Question: {query}
+
+Instructions:
+1. Search the context thoroughly for the answer
+2. If found: Provide the exact answer with relevant details
+3. If NOT found: State clearly that the information is not available
+4. Do NOT add any information not present in the context"""
             }
         ],
-        "temperature": 0.1,
+        "temperature": 0.0,  # Zero temperature for maximum accuracy
         "max_tokens": 1500,
         "top_p": 0.9
     }
@@ -580,18 +518,25 @@ def answer_question_with_groq(query, relevant_chunks):
 st.markdown("""
 <div class="main-card">
     <h1 style='text-align: center; margin: 0;'>📄 Smart Document Extractor</h1>
-    <p style='text-align: center; margin-top: 10px;'>Upload your files and get comprehensive analysis</p>
+    <p style='text-align: center; margin-top: 10px;'>Automatic processing from documents folder</p>
 </div>
 """, unsafe_allow_html=True)
 
-# File Upload
-uploaded_files = st.file_uploader(
-    "Upload your documents (PDF, DOCX, TXT)",
-    type=['pdf', 'docx', 'doc', 'txt'],
-    accept_multiple_files=True
-)
+# Get files from folder
+available_files = get_files_from_folder()
 
-if uploaded_files and st.button("🚀 Start Processing", type="primary", use_container_width=True):
+if not available_files:
+    st.warning(f"⚠️ No documents found in folder: {DOCS_FOLDER}")
+    st.info(f"📁 Please add PDF, DOCX, or TXT files to: {os.path.abspath(DOCS_FOLDER)}")
+else:
+    st.success(f"✅ Found {len(available_files)} document(s) in folder")
+    
+    # Show files
+    with st.expander("📂 Available Files", expanded=True):
+        for file in available_files:
+            st.write(f"• {os.path.basename(file)}")
+
+if available_files and st.button("🚀 Process All Documents", type="primary", use_container_width=True):
     with st.spinner("Processing documents..."):
         files_data = {}
         all_chunks = []
@@ -606,44 +551,73 @@ if uploaded_files and st.button("🚀 Start Processing", type="primary", use_con
         )
         
         progress_bar = st.progress(0)
+        status_text = st.empty()
         
-        for idx, file in enumerate(uploaded_files):
-            file_ext = file.name.split('.')[-1].lower()
+        for idx, filepath in enumerate(available_files):
+            filename = os.path.basename(filepath)
+            file_ext = filename.split('.')[-1].lower()
             
-            # Extract based on file type
-            if file_ext == 'pdf':
-                file_info = extract_pdf_detailed(file)
-            elif file_ext in ['docx', 'doc']:
-                file_info = extract_docx_detailed(file)
-            elif file_ext == 'txt':
-                file_info = extract_txt_detailed(file)
+            status_text.text(f"Processing: {filename}...")
+            
+            # Check cache
+            file_hash = get_file_hash(filepath)
+            cache_key = f"{file_hash}_{file_ext}"
+            cached_data = load_cache(cache_key)
+            
+            if cached_data:
+                st.info(f"📦 Using cached data for: {filename}")
+                file_info = cached_data
+                error = None
             else:
-                continue
+                # Extract based on file type
+                if file_ext == 'pdf':
+                    file_info, error = extract_pdf_detailed(filepath)
+                elif file_ext in ['docx', 'doc']:
+                    file_info, error = extract_docx_detailed(filepath)
+                elif file_ext == 'txt':
+                    file_info, error = extract_txt_detailed(filepath)
+                else:
+                    error = "Unsupported file type"
+                    file_info = None
+                
+                if error:
+                    st.error(f"❌ Error processing {filename}: {error}")
+                    continue
+                
+                # Save to cache
+                save_cache(cache_key, file_info)
+                st.success(f"💾 Cached data for: {filename}")
             
-            files_data[file.name] = file_info
+            files_data[filename] = file_info
             
             # Add to collection
             for chunk in file_info['chunks']:
                 all_chunks.append(chunk)
-                all_metadata.append({"source": file.name})
+                all_metadata.append({"source": filename})
             
-            progress_bar.progress((idx + 1) / len(uploaded_files))
+            progress_bar.progress((idx + 1) / len(available_files))
+        
+        status_text.text("Building search index...")
         
         # Batch insert into Chroma
-        batch_size = 500
-        for i in range(0, len(all_chunks), batch_size):
-            batch = all_chunks[i:i+batch_size]
-            metadata_batch = all_metadata[i:i+batch_size]
-            collection.add(
-                documents=batch,
-                ids=[f"chunk_{i+j}" for j in range(len(batch))],
-                metadatas=metadata_batch
-            )
+        if all_chunks:
+            batch_size = 500
+            for i in range(0, len(all_chunks), batch_size):
+                batch = all_chunks[i:i+batch_size]
+                metadata_batch = all_metadata[i:i+batch_size]
+                collection.add(
+                    documents=batch,
+                    ids=[f"chunk_{i+j}" for j in range(len(batch))],
+                    metadatas=metadata_batch
+                )
         
         st.session_state.files_data = files_data
         st.session_state.collection = collection
         st.session_state.processed = True
+        
+        status_text.empty()
         st.success("✅ Processing completed successfully!")
+        st.balloons()
 
 # Display Results
 if st.session_state.processed:
@@ -652,9 +626,8 @@ if st.session_state.processed:
     # Overall Statistics
     total_chunks = sum(len(info['chunks']) for info in st.session_state.files_data.values())
     total_tables = sum(info['total_tables'] for info in st.session_state.files_data.values())
-    total_images = sum(info['total_images'] for info in st.session_state.files_data.values())
     
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3 = st.columns(3)
     
     with col1:
         st.markdown(f"""
@@ -680,14 +653,6 @@ if st.session_state.processed:
 </div>
         """, unsafe_allow_html=True)
     
-    with col4:
-        st.markdown(f"""
-<div class="stat-box">
-    <h2 style='color: #667eea; margin: 0;'>{total_images}</h2>
-    <p style='margin: 5px 0 0 0;'>Images</p>
-</div>
-        """, unsafe_allow_html=True)
-    
     st.markdown("---")
     
     # File Selection
@@ -704,9 +669,7 @@ if st.session_state.processed:
     <p>📄 Pages: {file_info['total_pages']}</p>
     <p>📝 Chunks: {len(file_info['chunks'])}</p>
     <p>📊 Tables: {file_info['total_tables']}</p>
-    <p>📷 Images: {file_info['total_images']}</p>
     {f"<p>📊 Pages with tables: {', '.join(map(str, file_info['pages_with_tables']))}</p>" if file_info['pages_with_tables'] else ""}
-    {f"<p>📷 Pages with images: {', '.join(map(str, file_info['pages_with_images']))}</p>" if file_info['pages_with_images'] else ""}
 </div>
         """, unsafe_allow_html=True)
         
@@ -765,4 +728,16 @@ if st.session_state.processed:
                     st.markdown(f'<div class="chunk-display">{chunk}</div>', unsafe_allow_html=True)
 
 else:
-    st.info("👆 Upload your files to start")
+    st.info(f"📁 Add documents to folder: {os.path.abspath(DOCS_FOLDER)}")
+    st.markdown("""
+    **Supported formats:**
+    - 📄 PDF (with password support via PDF_PASSWORD env variable)
+    - 📝 DOCX/DOC
+    - 📃 TXT
+    
+    **Environment Variables:**
+    - `DOCS_FOLDER`: Path to documents folder (default: ./documents)
+    - `CACHE_FOLDER`: Path to cache folder (default: ./cache)
+    - `PDF_PASSWORD`: Password for encrypted PDFs
+    - `GROQ_API_KEY`: API key for Groq AI
+    """)
