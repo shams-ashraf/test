@@ -391,52 +391,44 @@ def get_embedding_function():
     )
 
 def answer_question_with_groq(query, relevant_chunks):
-    """استخدام Groq للإجابة على السؤال بناءً على المحتوى المستخرج فقط"""
     if not GROQ_API_KEY:
-        return "❌ الرجاء تعيين GROQ_API_KEY في متغيرات البيئة"
-    
+        return "❌ الرجاء تعيين GROQ_API_KEY في Streamlit Secrets"
+
+    context = "\n\n---\n\n".join(relevant_chunks[:5])
+
+    data = {
+        "model": GROQ_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": "أجب فقط من السياق التالي ولا تضف أي معرفة خارجية."
+            },
+            {
+                "role": "user",
+                "content": f"السياق:\n{context}\n\nالسؤال:\n{query}"
+            }
+        ],
+        "temperature": 0.1,
+        "max_tokens": 1500,
+        "top_p": 0.9
+    }
+
     try:
-        client = Groq(api_key=GROQ_API_KEY)
-        
-        # تجهيز السياق من القطع
-        context = "\n\n---\n\n".join(relevant_chunks[:5])  # أفضل 5 نتائج
-        
-        # Prompt محكم جداً
-        system_prompt = """أنت مساعد ذكي متخصص في الإجابة على الأسئلة من المستندات فقط.
-
-قواعد صارمة يجب الالتزام بها:
-1. اعتمد فقط وحصرياً على المحتوى المقدم في السياق
-2. إذا لم تجد الإجابة في السياق، قل بوضوح "لا توجد معلومات كافية في المستندات للإجابة على هذا السؤال"
-3. لا تضف أي معلومات من معرفتك الخاصة مهما كانت
-4. إذا كانت المعلومات جزئية، أذكر ذلك بوضوح
-5. اقتبس من النص مباشرة عندما يكون ذلك ممكناً
-6. كن دقيقاً ومحدداً في إجابتك
-7. إذا وجدت معلومات متناقضة، اذكر ذلك
-8. أجب بالعربية بشكل واضح ومنظم"""
-
-        user_prompt = f"""السياق من المستندات:
-{context}
-
-السؤال: {query}
-
-الإجابة (استناداً فقط على السياق أعلاه):"""
-
-        chat_completion = client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            model=GROQ_MODEL,
-            temperature=0.1,  # أقل حرارة للدقة
-            max_tokens=2000,
-            top_p=0.9
+        response = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json=data,
+            timeout=60
         )
-        
-        answer = chat_completion.choices[0].message.content
-        return answer
-        
+
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"]
+
     except Exception as e:
-        return f"❌ حدث خطأ في الاتصال بـ Groq: {str(e)}"
+        return f"❌ خطأ في الاتصال بـ Groq: {str(e)}"
 
 # Main UI
 st.markdown("""
