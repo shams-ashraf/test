@@ -127,32 +127,56 @@ def detect_table_structure_in_image(image):
         return False, {}, {}
 
 def extract_table_from_image(image):
-    """Extract structured table data from image"""
+    """Extract structured table data from image using DBSCAN clustering."""
     try:
-        has_table, x_positions, y_positions = detect_table_structure_in_image(image)
+        # OCR مع bounding boxes
+        ocr_data = pytesseract.image_to_data(image, lang='eng+ara', output_type=pytesseract.Output.DICT)
         
-        if not has_table:
+        words = []
+        for i, text in enumerate(ocr_data['text']):
+            if text.strip():
+                x = ocr_data['left'][i]
+                y = ocr_data['top'][i]
+                w = ocr_data['width'][i]
+                h = ocr_data['height'][i]
+                words.append({
+                    "text": text.strip(),
+                    "x": x + w/2,  # مركز الكلمة
+                    "y": y + h/2
+                })
+
+        if not words:
             return None
-        
-        # Build table structure
-        sorted_y = sorted(y_positions.keys())
-        sorted_x = sorted(x_positions.keys())
-        
+
+        # تحويل للإحداثيات numpy
+        x_coords = np.array([w['x'] for w in words]).reshape(-1, 1)
+        y_coords = np.array([w['y'] for w in words]).reshape(-1, 1)
+
+        # تجميع الأعمدة (x) وصفوف (y) باستخدام DBSCAN
+        x_labels = DBSCAN(eps=15, min_samples=1).fit_predict(x_coords)
+        y_labels = DBSCAN(eps=12, min_samples=1).fit_predict(y_coords)
+
+        # ترتيب الأعمدة والصفوف
+        unique_x = sorted(np.unique(x_labels))
+        unique_y = sorted(np.unique(y_labels))
+
         table_data = []
-        for y in sorted_y:
+        for y_lab in unique_y:
             row = []
-            for x in sorted_x:
-                # Find cells at this position
-                cell_text = ""
-                for text in y_positions[y]:
-                    if text in x_positions[x]:
-                        cell_text += text + " "
-                row.append(cell_text.strip())
-            if any(row):  # Only add non-empty rows
+            for x_lab in unique_x:
+                # الكلمات في هذا الصف والعمود
+                cell_words = [w['text'] for w, xl, yl in zip(words, x_labels, y_labels) if xl == x_lab and yl == y_lab]
+                row.append(" ".join(cell_words).strip())
+            if any(row):
                 table_data.append(row)
-        
-        return table_data if len(table_data) > 1 else None
-    except:
+
+        # شرط للتأكد أنه جدول فعلي
+        if len(table_data) > 1 and len(table_data[0]) > 1:
+            return table_data
+        return None
+
+    except Exception as e:
+        print("Error extracting table:", e)
         return None
 
 def structure_text_into_paragraphs(text):
