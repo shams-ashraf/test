@@ -1,6 +1,7 @@
 import streamlit as st
 import re
 import fitz
+import io
 import docx
 import uuid
 import glob
@@ -8,40 +9,87 @@ from sentence_transformers import SentenceTransformer
 import chromadb
 from chromadb.utils import embedding_functions
 import requests
+import json
+from datetime import datetime
+from io import BytesIO
 import os
+import time
 import pickle
 import hashlib
-from styles import load_custom_css
 
+# Configuration
 st.set_page_config(
-    page_title="BioMed Doc Chat",
-    page_icon="🧬",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    page_title="MBE Document Assistant - RAG Chatbot",
+    page_icon="🎓",
+    layout="wide"
 )
 
-load_custom_css()
+# Custom CSS
+st.markdown("""
+<style>
+    .main-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        padding: 2rem;
+        border-radius: 15px;
+        color: white;
+        margin-bottom: 2rem;
+    }
+    .stat-box {
+        background: white;
+        padding: 1.5rem;
+        border-radius: 10px;
+        text-align: center;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    .chunk-display {
+        background: #f8f9fa;
+        padding: 1.5rem;
+        border-radius: 8px;
+        border-left: 4px solid #667eea;
+        white-space: pre-wrap;
+        font-family: 'Courier New', monospace;
+        line-height: 1.6;
+    }
+    .answer-box {
+        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+        color: white;
+        padding: 2rem;
+        border-radius: 10px;
+        margin: 1rem 0;
+    }
+    .citation-tag {
+        background: #667eea;
+        color: white;
+        padding: 0.2rem 0.5rem;
+        border-radius: 5px;
+        font-size: 0.85em;
+        margin-right: 0.5rem;
+    }
+    .chat-message {
+        padding: 1rem;
+        border-radius: 10px;
+        margin: 0.5rem 0;
+    }
+    .user-message {
+        background: #e3f2fd;
+        margin-left: 2rem;
+    }
+    .assistant-message {
+        background: #f3e5f5;
+        margin-right: 2rem;
+    }
+</style>
+""", unsafe_allow_html=True)
 
+# Initialize session state
 if 'processed' not in st.session_state:
     st.session_state.processed = False
     st.session_state.files_data = {}
     st.session_state.collection = None
-    st.session_state.processing_started = False
+    st.session_state.messages = []  # Chat history
+    st.session_state.current_context = []  # للـ conversational flow
 
-if 'chat_sessions' not in st.session_state:
-    st.session_state.chat_sessions = {}
-    st.session_state.current_chat_id = None
-    st.session_state.next_chat_number = 1
-
-if st.session_state.current_chat_id is None:
-    chat_id = f"chat_{st.session_state.next_chat_number}"
-    st.session_state.chat_sessions[chat_id] = {
-        'messages': [],
-        'name': f"Chat {st.session_state.next_chat_number}"
-    }
-    st.session_state.current_chat_id = chat_id
-    st.session_state.next_chat_number += 1
-
+# Configuration
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = "llama-3.3-70b-versatile"
 PDF_PASSWORD = "mbe2025"
@@ -51,6 +99,10 @@ CACHE_FOLDER = os.getenv("CACHE_FOLDER", "./cache")
 os.makedirs(DOCS_FOLDER, exist_ok=True)
 os.makedirs(CACHE_FOLDER, exist_ok=True)
 
+if not GROQ_API_KEY:
+    st.error("⚠️ GROQ_API_KEY not found in environment variables!")
+
+# Helper Functions
 def get_file_hash(filepath):
     hash_md5 = hashlib.md5()
     with open(filepath, "rb") as f:
@@ -74,7 +126,7 @@ def save_cache(cache_key, data):
         with open(cache_file, 'wb') as f:
             pickle.dump(data, f)
     except Exception as e:
-        pass
+        st.warning(f"⚠️ Could not save cache: {str(e)}")
 
 def clean_text(text):
     text = re.sub(r'\s+', ' ', text)
@@ -167,9 +219,11 @@ def structure_text_into_paragraphs(text):
     return text
 
 def create_smart_chunks(text, chunk_size=1000, overlap=200, page_num=None, source_file=None, is_table=False, table_num=None):
+    """Enhanced chunking with metadata"""
     words = text.split()
     chunks = []
     
+    # Clean metadata - ChromaDB doesn't accept None values
     metadata = {
         'page': str(page_num) if page_num is not None else "N/A",
         'source': source_file if source_file else "Unknown",
@@ -277,11 +331,13 @@ def extract_pdf_detailed(filepath):
        
         all_elements.sort(key=lambda x: x['y_position'])
        
+        # Add document title header at the start of each page
         page_text = f"\n# Document: {filename} - Official MBE Regulations\n\n"
         page_text += f"\n{'═' * 60}\n📄 Page {page_num + 1}\n{'═' * 60}\n\n"
         for element in all_elements:
             page_text += element['content'] + "\n\n"
        
+        # Create chunks with metadata
         page_chunks = create_smart_chunks(
             page_text, 
             chunk_size=1500, 
@@ -291,11 +347,12 @@ def extract_pdf_detailed(filepath):
             is_table=False
         )
         
+        # Add table chunks separately with table metadata
         for element in all_elements:
             if element['type'] == 'table':
                 table_chunks = create_smart_chunks(
                     element['content'],
-                    chunk_size=2000,
+                    chunk_size=2000,  # Larger size for tables
                     overlap=0,
                     page_num=element['page'],
                     source_file=filename,
@@ -344,6 +401,7 @@ def extract_docx_detailed(filepath):
                     )
                     if table_text:
                         all_text.append(table_text)
+                        # Add table as separate chunk
                         table_chunks = create_smart_chunks(
                             table_text,
                             chunk_size=2000,
@@ -403,15 +461,37 @@ def get_embedding_function():
         model_name="intfloat/multilingual-e5-large"
     )
 
+def build_conversational_prompt(query, chat_history):
+    """Build context-aware prompt with chat history"""
+    if not chat_history:
+        return query
+    
+    # Last 3 exchanges for context
+    recent_history = chat_history[-6:]  # 3 Q&A pairs
+    context_lines = []
+    
+    for msg in recent_history:
+        role = msg['role']
+        content = msg['content'][:200]  # Limit length
+        if role == 'user':
+            context_lines.append(f"Previous Q: {content}")
+        else:
+            context_lines.append(f"Previous A: {content}")
+    
+    history_context = "\n".join(context_lines)
+    return f"Conversation context:\n{history_context}\n\nCurrent question: {query}"
+
 def answer_question_with_groq(query, relevant_chunks, chat_history=None):
     if not GROQ_API_KEY:
         return "❌ Please set GROQ_API_KEY in environment variables"
    
+    # Build context with precise citations
     context_parts = []
     for i, chunk_data in enumerate(relevant_chunks[:10], 1):
         content = chunk_data['content']
         meta = chunk_data['metadata']
         
+        # Handle string metadata from ChromaDB
         source = meta.get('source', 'Unknown')
         page = meta.get('page', 'N/A')
         is_table = meta.get('is_table', 'False')
@@ -426,13 +506,14 @@ def answer_question_with_groq(query, relevant_chunks, chat_history=None):
     
     context = "\n\n---\n\n".join(context_parts)
     
+    # Build conversation history for follow-ups
     conversation_summary = ""
     if chat_history and len(chat_history) > 0:
-        recent = chat_history[-6:]
+        recent = chat_history[-6:]  # Last 3 Q&A pairs
         conv_lines = []
         for msg in recent:
             role = "User" if msg['role'] == 'user' else "Assistant"
-            content_preview = msg['content'][:300]
+            content_preview = msg['content'][:300]  # Longer preview
             conv_lines.append(f"{role}: {content_preview}")
         conversation_summary = "\n".join(conv_lines)
    
@@ -452,22 +533,15 @@ CRITICAL RULES:
    - Don't search for new information if the question refers to what you just said
 4. If user says "summarize that" or "summarize it": Condense your LAST answer (from conversation history)
 5. If no relevant info in sources OR history: "No sufficient information in the available documents"
-6. Use the SAME language as the question:
-   - English question → English answer
-   - German question → German answer (Deutsch)
+6. Use the SAME language as the question (English/German/Arabic)
 7. Be CONCISE - short, direct answers unless asked to elaborate
 8. For counting questions: Count precisely and list all items with citations
-
-LANGUAGE DETECTION:
-- Detect question language automatically
-- Respond in the exact same language
-- Maintain professional academic tone
 
 FOLLOW-UP DETECTION:
 - "that", "it", "this", "summarize", "tell me more", "elaborate", "explain further" → Use conversation history
 - New factual questions → Use sources
 
-Remember: You're helping MBE students understand their program requirements clearly and accurately in their preferred language."""
+Remember: You're helping MBE students understand their program requirements clearly and accurately."""
             },
             {
                 "role": "user",
@@ -482,13 +556,12 @@ CURRENT QUESTION: {query}
 Instructions: 
 - If this is a follow-up (summarize/elaborate/that/it), answer from conversation history
 - If this is a new question, answer from sources with citations
-- Always respond in the SAME language as the question
 - Always be precise and cite your sources
 
 ANSWER:"""
             }
         ],
-        "temperature": 0.1,
+        "temperature": 0.1,  # Slightly higher for better conversational flow
         "max_tokens": 2000,
     }
    
@@ -507,237 +580,238 @@ ANSWER:"""
     except Exception as e:
         return f"❌ Error connecting to Groq: {str(e)}"
 
-def process_documents_automatically():
-    if st.session_state.processed or st.session_state.processing_started:
-        return
-    
-    st.session_state.processing_started = True
-    
-    available_files = get_files_from_folder()
-    if not available_files:
-        st.session_state.processed = True
-        return
-    
-    # Create progress placeholder
-    progress_container = st.empty()
-    
-    files_data = {}
-    all_chunks = []
-    all_metadata = []
-    
-    client = chromadb.Client()
-    collection_name = f"docs_{uuid.uuid4().hex[:8]}"
-    collection = client.create_collection(
-        name=collection_name,
-        embedding_function=get_embedding_function()
-    )
-    
-    total_files = len(available_files)
-       
-    for idx, filepath in enumerate(available_files, 1):
-        filename = os.path.basename(filepath)
-        file_ext = filename.split('.')[-1].lower()
-        
-        # Update progress
-        percentage = int((idx / total_files) * 100)
-        progress_container.markdown(f"""
-        <div style='text-align: center; padding: 30px;'>
-            <h3 style='color: #00d4ff;'>🔄 Loading Documents... {percentage}%</h3>
-            <p style='color: #e8e8e8; font-size: 1.1rem;'>Processing: <strong>{filename}</strong></p>
-            <div style='background: rgba(255,255,255,0.1); border-radius: 10px; height: 30px; margin: 20px auto; max-width: 500px; overflow: hidden;'>
-                <div style='background: linear-gradient(90deg, #00d9ff 0%, #0099cc 100%); height: 100%; width: {percentage}%; transition: width 0.3s;'></div>
-            </div>
-            <p style='color: #a0a0a0;'>Document {idx} of {total_files}</p>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        file_hash = get_file_hash(filepath)
-        cache_key = f"{file_hash}_{file_ext}"
-        cached_data = load_cache(cache_key)
-        
-        if cached_data:
-            file_info = cached_data
-            error = None
-        else:
-            if file_ext == 'pdf':
-                file_info, error = extract_pdf_detailed(filepath)
-            elif file_ext in ['docx', 'doc']:
-                file_info, error = extract_docx_detailed(filepath)
-            elif file_ext == 'txt':
-                file_info, error = extract_txt_detailed(filepath)
-            else:
-                file_info, error = None, f"❌ Unsupported file type: {file_ext}"
-            
-            if file_info and not error:
-                save_cache(cache_key, file_info)
-        
-        if error:
-            continue
-        
-        if file_info and len(file_info['chunks']) > 0:
-            files_data[filename] = file_info
-            
-            for chunk in file_info['chunks']:
-                all_chunks.append(chunk['content'])
-                all_metadata.append(chunk['metadata'])
-    
-    # Clear progress and finalize
-    progress_container.empty()
-    
-    if all_chunks:
-        chunk_ids = [f"chunk_{uuid.uuid4().hex}" for _ in all_chunks]
-        collection.add(
-            documents=all_chunks,
-            metadatas=all_metadata,
-            ids=chunk_ids
-        )
-        
-        st.session_state.files_data = files_data
-        st.session_state.collection = collection
-        st.session_state.processed = True
-    else:
-        st.session_state.processed = True
-
+# Main UI
 st.markdown("""
-<div style='text-align: center; margin-bottom: 30px;'>
-    <h1 style='color: #00d4ff; font-size: 3em; margin: 0;'>
-        🧬 Biomedical Document Chatbot
-    </h1>
+<div class="main-card">
+    <h1 style='text-align: center; margin: 0;'>🎓 MBE Document Assistant</h1>
+    <p style='text-align: center; margin-top: 10px;'>RAG Chatbot for Biomedical Engineering at Hochschule Anhalt</p>
 </div>
 """, unsafe_allow_html=True)
 
-process_documents_automatically()
-
+# Sidebar for document management
 with st.sidebar:
-    st.markdown("""
-    <div style='text-align: center; padding: 20px 0;'>
-        <div style='font-size: 4em;'>🧬</div>
-        <h2 style='color: #00d4ff; margin: 10px 0;'>BioMed<br>Doc Chat</h2>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown("### 📚 Document Management")
     
-    if st.button("➕ New Chat", use_container_width=True, key="new_chat_btn"):
-        chat_id = f"chat_{st.session_state.next_chat_number}"
-        st.session_state.chat_sessions[chat_id] = {
-            'messages': [],
-            'name': f"Chat {st.session_state.next_chat_number}"
-        }
-        st.session_state.current_chat_id = chat_id
-        st.session_state.next_chat_number += 1
-        st.rerun()
-    
-    st.markdown("---")
-    
-    st.markdown("### 💬 Chat History")
-    
-    for chat_id in list(st.session_state.chat_sessions.keys()):
-        chat_name = st.session_state.chat_sessions[chat_id]['name']
-        msg_count = len(st.session_state.chat_sessions[chat_id]['messages'])
-        
-        if msg_count > 0:
-            first_msg = st.session_state.chat_sessions[chat_id]['messages'][0]['content']
-            preview = first_msg[:50] + "..." if len(first_msg) > 50 else first_msg
-        else:
-            preview = "New conversation"
-        
-        if st.button(
-            f"💬 {preview}",
-            key=f"chat_{chat_id}",
-            use_container_width=True,
-            disabled=(chat_id == st.session_state.current_chat_id)
-        ):
-            st.session_state.current_chat_id = chat_id
-            st.rerun()
-    
-    st.markdown("---")
-    st.markdown("### 📚 Document Information")
-    
-    if st.session_state.processed and st.session_state.files_data:
-        with st.expander("📄 About This Chatbot", expanded=False):
-            st.markdown(f"""
-            **Documents Loaded:** {len(st.session_state.files_data)}
-            
-            **Capabilities:**
-            - 🔍 Search through MBE documents
-            - 💬 Ask questions in English or German
-            - 📊 Extract information from tables
-            - 📝 Get cited, accurate answers
-            """)
-            
-            for filename, info in st.session_state.files_data.items():
-                st.markdown(f"**{filename}**")
-                st.text(f"📄 Pages: {info['total_pages']} | 📊 Tables: {info['total_tables']} | 📦 Chunks: {len(info['chunks'])}")
+    available_files = get_files_from_folder()
+    if not available_files:
+        st.warning(f"⚠️ No documents found")
+        st.info(f"📁 Add files to: {DOCS_FOLDER}")
     else:
-        with st.expander("📄 About This Chatbot", expanded=False):
-            st.info("No documents loaded yet")
-
-# Get current chat messages
-current_messages = st.session_state.chat_sessions[st.session_state.current_chat_id]['messages']
-
-if st.session_state.processed:
-    for message in current_messages:
-        role_class = "user-message" if message["role"] == "user" else "assistant-message"
-        icon = "👤" if message["role"] == "user" else "🤖"
-        header = "YOU" if message["role"] == "user" else "ASSISTANT"
-        
-        st.markdown(f"""
-        <div class='chat-message {role_class}'>
-            <div class='message-header'>{icon} {header}</div>
-            <div>{message['content']}</div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.success(f"✅ {len(available_files)} document(s)")
+        with st.expander("📂 Files", expanded=False):
+            for file in available_files:
+                st.write(f"• {os.path.basename(file)}")
     
-    if query := st.chat_input("Ask your question here..."):
-        current_messages.append({"role": "user", "content": query})
-        
-        st.markdown(f"""
-        <div class='chat-message user-message'>
-            <div class='message-header'>👤 YOU</div>
-            <div>{query}</div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        with st.spinner("🔍 Searching documents..."):
-            try:
-                results = st.session_state.collection.query(
-                    query_texts=[query],
-                    n_results=10
-                )
-                
-                relevant_chunks = []
-                if results['documents'] and len(results['documents'][0]) > 0:
-                    for i in range(len(results['documents'][0])):
-                        relevant_chunks.append({
-                            'content': results['documents'][0][i],
-                            'metadata': results['metadatas'][0][i]
+    st.markdown("---")
+    
+    if available_files and st.button("🚀 Process Documents", type="primary", use_container_width=True):
+        with st.spinner("Processing..."):
+            files_data = {}
+            all_chunks = []
+            all_metadata = []
+           
+            client = chromadb.Client()
+            collection_name = f"docs_{uuid.uuid4().hex[:8]}"
+            collection = client.create_collection(
+                name=collection_name,
+                embedding_function=get_embedding_function()
+            )
+           
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+           
+            for idx, filepath in enumerate(available_files):
+                filename = os.path.basename(filepath)
+                file_ext = filename.split('.')[-1].lower()
+               
+                status_text.text(f"Processing: {filename}...")
+               
+                file_hash = get_file_hash(filepath)
+                cache_key = f"{file_hash}_{file_ext}"
+                cached_data = load_cache(cache_key)
+               
+                if cached_data:
+                    st.info(f"📦 Cached: {filename}")
+                    file_info = cached_data
+                    error = None
+                else:
+                    if file_ext == 'pdf':
+                        file_info, error = extract_pdf_detailed(filepath)
+                    elif file_ext in ['docx', 'doc']:
+                        file_info, error = extract_docx_detailed(filepath)
+                    elif file_ext == 'txt':
+                        file_info, error = extract_txt_detailed(filepath)
+                    else:
+                        error = "Unsupported file type"
+                        file_info = None
+                   
+                    if error:
+                        st.error(f"❌ {filename}: {error}")
+                        continue
+                   
+                    save_cache(cache_key, file_info)
+                    st.success(f"💾 Cached: {filename}")
+               
+                files_data[filename] = file_info
+               
+                # Add chunks with full metadata
+                for chunk_obj in file_info['chunks']:
+                    # Handle both dict and string formats
+                    if isinstance(chunk_obj, dict):
+                        all_chunks.append(chunk_obj['content'])
+                        all_metadata.append(chunk_obj['metadata'])
+                    else:
+                        # Fallback for old cached data
+                        all_chunks.append(chunk_obj)
+                        all_metadata.append({
+                            "source": filename, 
+                            "page": "N/A",
+                            "is_table": "False",
+                            "table_number": "N/A"
                         })
-                
-                answer = answer_question_with_groq(
-                    query, 
-                    relevant_chunks, 
-                    chat_history=current_messages[:-1]
-                )
-                
-                current_messages.append({"role": "assistant", "content": answer})
-                
-                st.markdown(f"""
-                <div class='chat-message assistant-message'>
-                    <div class='message-header'>🤖 ASSISTANT</div>
-                    <div>{answer}</div>
-                </div>
-                """, unsafe_allow_html=True)
-                
-            except Exception as e:
-                error_msg = f"❌ Error processing query: {str(e)}"
-                st.error(error_msg)
-                current_messages.append({"role": "assistant", "content": error_msg})
+               
+                progress_bar.progress((idx + 1) / len(available_files))
+           
+            status_text.text("Building search index...")
+           
+            if all_chunks:
+                batch_size = 500
+                for i in range(0, len(all_chunks), batch_size):
+                    batch = all_chunks[i:i+batch_size]
+                    metadata_batch = all_metadata[i:i+batch_size]
+                    collection.add(
+                        documents=batch,
+                        ids=[f"chunk_{i+j}" for j in range(len(batch))],
+                        metadatas=metadata_batch
+                    )
+           
+            st.session_state.files_data = files_data
+            st.session_state.collection = collection
+            st.session_state.processed = True
+            st.session_state.messages = []  # Reset chat
+           
+            status_text.empty()
+            st.success("✅ Processing completed!")
+            st.balloons()
+    
+    if st.session_state.processed:
+        st.markdown("---")
+        st.markdown("### 📊 Statistics")
+        total_chunks = sum(len(info['chunks']) for info in st.session_state.files_data.values())
+        total_tables = sum(info['total_tables'] for info in st.session_state.files_data.values())
+        
+        st.metric("Files", len(st.session_state.files_data))
+        st.metric("Chunks", total_chunks)
+        st.metric("Tables", total_tables)
+        
+        st.markdown("---")
+        
+        if st.button("🔄 Clear Chat History"):
+            st.session_state.messages = []
+            st.session_state.current_context = []
+            st.rerun()
+        
+        if st.button("🗑️ Clear Cache & Reprocess"):
+            import shutil
+            if os.path.exists(CACHE_FOLDER):
+                shutil.rmtree(CACHE_FOLDER)
+                os.makedirs(CACHE_FOLDER)
+            st.session_state.processed = False
+            st.session_state.files_data = {}
+            st.session_state.collection = None
+            st.session_state.messages = []
+            st.success("✅ Cache cleared! Click 'Process Documents' to reprocess.")
+            st.rerun()
+
+# Main chat interface
+if st.session_state.processed:
+    st.markdown("### 💬 Chat with Documents")
+    
+    # Display chat history
+    for message in st.session_state.messages:
+        role = message["role"]
+        content = message["content"]
+        
+        if role == "user":
+            st.markdown(f'<div class="chat-message user-message">👤 <b>You:</b> {content}</div>', unsafe_allow_html=True)
+        else:
+            st.markdown(f'<div class="chat-message assistant-message">🤖 <b>Assistant:</b><br>{content}</div>', unsafe_allow_html=True)
+    
+    # Chat input
+    query = st.chat_input("Ask anything about your documents...")
+    
+    if query:
+        # Add user message
+        st.session_state.messages.append({"role": "user", "content": query})
+        
+        with st.spinner("Thinking..."):
+            # Search with metadata
+            results = st.session_state.collection.query(
+                query_texts=[query],
+                n_results=10
+            )
+            
+            # Build chunk objects with metadata
+            relevant_chunks = []
+            for content, metadata in zip(results["documents"][0], results["metadatas"][0]):
+                relevant_chunks.append({
+                    'content': content,
+                    'metadata': metadata
+                })
+            
+            # Generate answer with chat history
+            answer = answer_question_with_groq(query, relevant_chunks, st.session_state.messages)
+            
+            # Add assistant message
+            st.session_state.messages.append({"role": "assistant", "content": answer})
+            
+            # Store context for follow-ups
+            st.session_state.current_context = relevant_chunks
         
         st.rerun()
+    
+    # Show sources in expander
+    if st.session_state.current_context:
+        with st.expander("📄 View Sources", expanded=False):
+            for idx, chunk_data in enumerate(st.session_state.current_context[:5], 1):
+                meta = chunk_data['metadata']
+                
+                # Handle string metadata
+                source = meta.get('source', 'Unknown')
+                page = meta.get('page', 'N/A')
+                is_table = meta.get('is_table', 'False')
+                table_num = meta.get('table_number', 'N/A')
+                
+                citation_info = f"📄 **Source {idx}**: {source} | Page {page}"
+                if is_table == 'True' or is_table == True:
+                    citation_info += f" | Table {table_num}"
+                
+                st.markdown(citation_info)
+                st.markdown(f'<div class="chunk-display">{chunk_data["content"][:500]}...</div>', unsafe_allow_html=True)
+                st.markdown("---")
+
 else:
-    # This will only show on very first load before processing starts
+    st.info("👈 Click 'Process Documents' in the sidebar to start!")
+    
     st.markdown("""
-    <div style='text-align: center; padding: 50px;'>
-        <h3 style='color: #00d4ff;'>🔄 Initializing system...</h3>
-        <p style='color: #e8e8e8;'>Please wait a moment</p>
-    </div>
-    """, unsafe_allow_html=True)
+    ### 🎯 Features:
+    - **Precise Citations**: Every answer includes file + page + table references
+    - **Conversational**: Ask follow-up questions naturally ("summarize that", "tell me more")
+    - **Smart Context**: Understands when you refer to previous answers
+    - **Multi-language**: Supports English, German, and Arabic
+    - **Fast**: Cached processing for instant responses
+    - **MBE-Specific**: Optimized for biomedical engineering regulations
+    
+    ### 📋 Supported Documents:
+    - 📄 Study & Examination Regulations (SPO)
+    - 📚 Module Handbook
+    - 📝 Guide for Writing Scientific Papers
+    - 📃 Notes on Bachelor/Master Theses
+    - ✍️ Scientific Writing Guidelines
+    
+    ### 💡 Example Questions:
+    - "How many modules in semester 1?"
+    - "What are the thesis requirements?"
+    - "Tell me about the internship" → then "summarize that"
+    - "Compare exam types in SPO"
+    """)
