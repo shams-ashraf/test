@@ -16,70 +16,8 @@ import os
 import time
 import pickle
 import hashlib
+from styles import load_custom_css
 
-# Configuration
-st.set_page_config(
-    page_title="MBE Document Assistant - RAG Chatbot",
-    page_icon="🎓",
-    layout="wide"
-)
-
-# Custom CSS
-st.markdown("""
-<style>
-    .main-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 2rem;
-        border-radius: 15px;
-        color: white;
-        margin-bottom: 2rem;
-    }
-    .stat-box {
-        background: white;
-        padding: 1.5rem;
-        border-radius: 10px;
-        text-align: center;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-    }
-    .chunk-display {
-        background: #f8f9fa;
-        padding: 1.5rem;
-        border-radius: 8px;
-        border-left: 4px solid #667eea;
-        white-space: pre-wrap;
-        font-family: 'Courier New', monospace;
-        line-height: 1.6;
-    }
-    .answer-box {
-        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-        color: white;
-        padding: 2rem;
-        border-radius: 10px;
-        margin: 1rem 0;
-    }
-    .citation-tag {
-        background: #667eea;
-        color: white;
-        padding: 0.2rem 0.5rem;
-        border-radius: 5px;
-        font-size: 0.85em;
-        margin-right: 0.5rem;
-    }
-    .chat-message {
-        padding: 1rem;
-        border-radius: 10px;
-        margin: 0.5rem 0;
-    }
-    .user-message {
-        background: #e3f2fd;
-        margin-left: 2rem;
-    }
-    .assistant-message {
-        background: #f3e5f5;
-        margin-right: 2rem;
-    }
-</style>
-""", unsafe_allow_html=True)
 
 # Initialize session state
 if 'processed' not in st.session_state:
