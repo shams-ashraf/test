@@ -631,8 +631,14 @@ with st.sidebar:
                
                 # Add chunks with full metadata
                 for chunk_obj in file_info['chunks']:
-                    all_chunks.append(chunk_obj['content'])
-                    all_metadata.append(chunk_obj['metadata'])
+                    # Handle both dict and string formats
+                    if isinstance(chunk_obj, dict):
+                        all_chunks.append(chunk_obj['content'])
+                        all_metadata.append(chunk_obj['metadata'])
+                    else:
+                        # Fallback for old cached data
+                        all_chunks.append(chunk_obj)
+                        all_metadata.append({"source": filename, "page": None})
                
                 progress_bar.progress((idx + 1) / len(available_files))
            
