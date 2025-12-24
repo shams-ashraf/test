@@ -7,4 +7,5 @@ langdetect
 python-docx
 pytesseract
 Pillow
-python-docx
+patool
+opencv-python-headless==4.8.1.78
