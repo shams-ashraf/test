@@ -541,118 +541,102 @@ with st.sidebar:
                 st.write(f"• {os.path.basename(file)}")
     
     st.markdown("---")
-    
-    if available_files and st.button("🚀 Process Documents", type="primary", use_container_width=True):
-        with st.spinner("Processing..."):
-            files_data = {}
-            all_chunks = []
-            all_metadata = []
-    
-            # ---------------------------
-            # Persistent ChromaDB Setup
-            # ---------------------------
-            persist_dir = "./chroma_db"
-            collection_name = "mbe_docs"
-            os.makedirs(persist_dir, exist_ok=True)
-    
-            client = chromadb.Client(chromadb.config.Settings(
-                persist_directory=persist_dir
-            ))
-    
-            # استخدم collection موجودة لو موجودة، أو اعمل واحدة جديدة
-            existing_collections = [c.name for c in client.list_collections()]
-            if collection_name in existing_collections:
-                collection = client.get_collection(name=collection_name)
+    # حدد فولدر persist
+PERSIST_DIR = "./chroma_db"
+os.makedirs(PERSIST_DIR, exist_ok=True)  # لو مش موجود، Streamlit هينشئه تلقائياً
+
+if available_files and st.button("🚀 Process Documents", type="primary", use_container_width=True):
+    with st.spinner("Processing..."):
+        files_data = {}
+        all_chunks = []
+        all_metadata = []
+
+        # إنشاء عميل ChromaDB
+        client = chromadb.Client(
+            chromadb.config.Settings(persist_directory=PERSIST_DIR)
+        )
+
+        # إنشاء collection جديد
+        collection_name = f"docs_{uuid.uuid4().hex[:8]}"
+        collection = client.create_collection(
+            name=collection_name,
+            embedding_function=get_embedding_function()
+        )
+
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        for idx, filepath in enumerate(available_files):
+            filename = os.path.basename(filepath)
+            file_ext = filename.split('.')[-1].lower()
+
+            status_text.text(f"Processing: {filename}...")
+
+            file_hash = get_file_hash(filepath)
+            cache_key = f"{file_hash}_{file_ext}"
+            cached_data = load_cache(cache_key)
+
+            if cached_data:
+                st.info(f"📦 Cached: {filename}")
+                file_info = cached_data
+                error = None
             else:
-                collection = client.create_collection(
-                    name=collection_name,
-                    embedding_function=get_embedding_function()
-                )
-    
-            # ---------------------------
-            # Processing Files
-            # ---------------------------
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-    
-            for idx, filepath in enumerate(available_files):
-                filename = os.path.basename(filepath)
-                file_ext = filename.split('.')[-1].lower()
-    
-                status_text.text(f"Processing: {filename}...")
-    
-                file_hash = get_file_hash(filepath)
-                cache_key = f"{file_hash}_{file_ext}"
-                cached_data = load_cache(cache_key)
-    
-                if cached_data:
-                    st.info(f"📦 Cached: {filename}")
-                    file_info = cached_data
-                    error = None
+                if file_ext == 'pdf':
+                    file_info, error = extract_pdf_detailed(filepath)
+                elif file_ext in ['docx', 'doc']:
+                    file_info, error = extract_docx_detailed(filepath)
+                elif file_ext == 'txt':
+                    file_info, error = extract_txt_detailed(filepath)
                 else:
-                    if file_ext == 'pdf':
-                        file_info, error = extract_pdf_detailed(filepath)
-                    elif file_ext in ['docx', 'doc']:
-                        file_info, error = extract_docx_detailed(filepath)
-                    elif file_ext == 'txt':
-                        file_info, error = extract_txt_detailed(filepath)
-                    else:
-                        error = "Unsupported file type"
-                        file_info = None
-    
-                    if error:
-                        st.error(f"❌ {filename}: {error}")
-                        continue
-    
-                    save_cache(cache_key, file_info)
-                    st.success(f"💾 Cached: {filename}")
-    
-                files_data[filename] = file_info
-    
-                # Add chunks with full metadata
-                for chunk_obj in file_info['chunks']:
-                    if isinstance(chunk_obj, dict):
-                        all_chunks.append(chunk_obj['content'])
-                        all_metadata.append(chunk_obj['metadata'])
-                    else:
-                        # Fallback for old cached data
-                        all_chunks.append(chunk_obj)
-                        all_metadata.append({
-                            "source": filename,
-                            "page": "N/A",
-                            "is_table": "False",
-                            "table_number": "N/A"
-                        })
-    
-                progress_bar.progress((idx + 1) / len(available_files))
-    
-            status_text.text("Building search index...")
-    
-            # ---------------------------
-            # Add to ChromaDB and persist
-            # ---------------------------
-            if all_chunks:
-                batch_size = 500
-                for i in range(0, len(all_chunks), batch_size):
-                    batch = all_chunks[i:i+batch_size]
-                    metadata_batch = all_metadata[i:i+batch_size]
-                    collection.add(
-                        documents=batch,
-                        ids=[f"chunk_{i+j}" for j in range(len(batch))],
-                        metadatas=metadata_batch
-                    )
-    
-                # Persist the collection to disk
-                collection.client.persist()
-    
-            st.session_state.files_data = files_data
-            st.session_state.collection = collection
-            st.session_state.processed = True
-            st.session_state.messages = []  # Reset chat
-    
-            status_text.empty()
-            st.success("✅ Processing completed!")
-            st.balloons()
+                    error = "Unsupported file type"
+                    file_info = None
+
+                if error:
+                    st.error(f"❌ {filename}: {error}")
+                    continue
+
+                save_cache(cache_key, file_info)
+                st.success(f"💾 Cached: {filename}")
+
+            files_data[filename] = file_info
+
+            # إضافة chunks مع metadata
+            for chunk_obj in file_info['chunks']:
+                if isinstance(chunk_obj, dict):
+                    all_chunks.append(chunk_obj['content'])
+                    all_metadata.append(chunk_obj['metadata'])
+                else:
+                    all_chunks.append(chunk_obj)
+                    all_metadata.append({
+                        "source": filename,
+                        "page": "N/A",
+                        "is_table": "False",
+                        "table_number": "N/A"
+                    })
+
+            progress_bar.progress((idx + 1) / len(available_files))
+
+        status_text.text("Building search index...")
+
+        if all_chunks:
+            batch_size = 500
+            for i in range(0, len(all_chunks), batch_size):
+                batch = all_chunks[i:i+batch_size]
+                metadata_batch = all_metadata[i:i+batch_size]
+                collection.add(
+                    documents=batch,
+                    ids=[f"chunk_{i+j}" for j in range(len(batch))],
+                    metadatas=metadata_batch
+                )
+
+        st.session_state.files_data = files_data
+        st.session_state.collection = collection
+        st.session_state.processed = True
+        st.session_state.messages = []  # Reset chat
+
+        status_text.empty()
+        st.success("✅ Processing completed!")
+        st.balloons()
 
     
     if st.session_state.processed:
