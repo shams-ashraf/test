@@ -7,4 +7,4 @@ langdetect
 python-docx
 pytesseract
 Pillow
-
+python-docx
