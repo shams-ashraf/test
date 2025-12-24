@@ -222,17 +222,20 @@ def create_smart_chunks(text, chunk_size=1000, overlap=200, page_num=None, sourc
     """Enhanced chunking with metadata"""
     words = text.split()
     chunks = []
+    
+    # Clean metadata - ChromaDB doesn't accept None values
+    metadata = {
+        'page': str(page_num) if page_num is not None else "N/A",
+        'source': source_file if source_file else "Unknown",
+        'is_table': str(is_table),
+        'table_number': str(table_num) if table_num is not None else "N/A"
+    }
    
     if len(words) <= chunk_size:
         if text.strip():
             return [{
                 'content': text,
-                'metadata': {
-                    'page': page_num,
-                    'source': source_file,
-                    'is_table': is_table,
-                    'table_number': table_num
-                }
+                'metadata': metadata
             }]
         return []
    
@@ -242,12 +245,7 @@ def create_smart_chunks(text, chunk_size=1000, overlap=200, page_num=None, sourc
         if len(chunk.split()) >= 30:
             chunks.append({
                 'content': chunk,
-                'metadata': {
-                    'page': page_num,
-                    'source': source_file,
-                    'is_table': is_table,
-                    'table_number': table_num
-                }
+                'metadata': metadata.copy()
             })
    
     return chunks
@@ -491,9 +489,15 @@ def answer_question_with_groq(query, relevant_chunks, chat_history=None):
         content = chunk_data['content']
         meta = chunk_data['metadata']
         
-        citation = f"[Source {i}: {meta.get('source', 'Unknown')}, Page {meta.get('page', 'N/A')}"
-        if meta.get('is_table'):
-            citation += f", Table {meta.get('table_number', 'N/A')}"
+        # Handle string metadata from ChromaDB
+        source = meta.get('source', 'Unknown')
+        page = meta.get('page', 'N/A')
+        is_table = meta.get('is_table', 'False')
+        table_num = meta.get('table_number', 'N/A')
+        
+        citation = f"[Source {i}: {source}, Page {page}"
+        if is_table == 'True' or is_table == True:
+            citation += f", Table {table_num}"
         citation += "]"
         
         context_parts.append(f"{citation}\n{content}")
@@ -638,7 +642,12 @@ with st.sidebar:
                     else:
                         # Fallback for old cached data
                         all_chunks.append(chunk_obj)
-                        all_metadata.append({"source": filename, "page": None})
+                        all_metadata.append({
+                            "source": filename, 
+                            "page": "N/A",
+                            "is_table": "False",
+                            "table_number": "N/A"
+                        })
                
                 progress_bar.progress((idx + 1) / len(available_files))
            
@@ -730,9 +739,16 @@ if st.session_state.processed:
         with st.expander("📄 View Sources", expanded=False):
             for idx, chunk_data in enumerate(st.session_state.current_context[:5], 1):
                 meta = chunk_data['metadata']
-                citation_info = f"📄 **Source {idx}**: {meta.get('source', 'Unknown')} | Page {meta.get('page', 'N/A')}"
-                if meta.get('is_table'):
-                    citation_info += f" | Table {meta.get('table_number', 'N/A')}"
+                
+                # Handle string metadata
+                source = meta.get('source', 'Unknown')
+                page = meta.get('page', 'N/A')
+                is_table = meta.get('is_table', 'False')
+                table_num = meta.get('table_number', 'N/A')
+                
+                citation_info = f"📄 **Source {idx}**: {source} | Page {page}"
+                if is_table == 'True' or is_table == True:
+                    citation_info += f" | Table {table_num}"
                 
                 st.markdown(citation_info)
                 st.markdown(f'<div class="chunk-display">{chunk_data["content"][:500]}...</div>', unsafe_allow_html=True)
