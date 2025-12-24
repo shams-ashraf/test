@@ -525,6 +525,7 @@ st.markdown("""
     <p style='text-align: center; margin-top: 10px;'>RAG Chatbot for Biomedical Engineering at Hochschule Anhalt</p>
 </div>
 """, unsafe_allow_html=True)
+
 # Sidebar for document management
 with st.sidebar:
     st.markdown("### 📚 Document Management")
@@ -541,118 +542,124 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # Process documents only if not already processed
-    if not st.session_state.get('processed', False):
-        if available_files and st.button("🚀 Process Documents", type="primary", use_container_width=True):
-            with st.spinner("Processing..."):
-                files_data = {}
-                all_chunks = []
-                all_metadata = []
+    if available_files and st.button("🚀 Process Documents", type="primary", use_container_width=True):
+        with st.spinner("Processing..."):
+            files_data = {}
+            all_chunks = []
+            all_metadata = []
+           
+            client = chromadb.Client()
+            collection_name = f"docs_{uuid.uuid4().hex[:8]}"
+            collection = client.create_collection(
+                name=collection_name,
+                embedding_function=get_embedding_function()
+            )
+           
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+           
+            for idx, filepath in enumerate(available_files):
+                filename = os.path.basename(filepath)
+                file_ext = filename.split('.')[-1].lower()
                
-                client = chromadb.Client(chromadb.config.Settings(
-                    persist_directory="./chroma_db"
-                ))
-                collection_name = f"docs_{uuid.uuid4().hex[:8]}"
-                collection = client.create_collection(
-                    name=collection_name,
-                    embedding_function=get_embedding_function()
-                )
+                status_text.text(f"Processing: {filename}...")
                
-                progress_bar = st.progress(0)
-                status_text = st.empty()
+                file_hash = get_file_hash(filepath)
+                cache_key = f"{file_hash}_{file_ext}"
+                cached_data = load_cache(cache_key)
                
-                for idx, filepath in enumerate(available_files):
-                    filename = os.path.basename(filepath)
-                    file_ext = filename.split('.')[-1].lower()
-                   
-                    status_text.text(f"Processing: {filename}...")
-                   
-                    file_hash = get_file_hash(filepath)
-                    cache_key = f"{file_hash}_{file_ext}"
-                    cached_data = load_cache(cache_key)
-                   
-                    if cached_data:
-                        st.info(f"📦 Cached: {filename}")
-                        file_info = cached_data
-                        error = None
+                if cached_data:
+                    st.info(f"📦 Cached: {filename}")
+                    file_info = cached_data
+                    error = None
+                else:
+                    if file_ext == 'pdf':
+                        file_info, error = extract_pdf_detailed(filepath)
+                    elif file_ext in ['docx', 'doc']:
+                        file_info, error = extract_docx_detailed(filepath)
+                    elif file_ext == 'txt':
+                        file_info, error = extract_txt_detailed(filepath)
                     else:
-                        if file_ext == 'pdf':
-                            file_info, error = extract_pdf_detailed(filepath)
-                        elif file_ext in ['docx', 'doc']:
-                            file_info, error = extract_docx_detailed(filepath)
-                        elif file_ext == 'txt':
-                            file_info, error = extract_txt_detailed(filepath)
-                        else:
-                            error = "Unsupported file type"
-                            file_info = None
-                       
-                        if error:
-                            st.error(f"❌ {filename}: {error}")
-                            continue
-                       
-                        save_cache(cache_key, file_info)
-                        st.success(f"💾 Cached: {filename}")
+                        error = "Unsupported file type"
+                        file_info = None
                    
-                    files_data[filename] = file_info
+                    if error:
+                        st.error(f"❌ {filename}: {error}")
+                        continue
                    
-                    # Add chunks with full metadata
-                    for chunk_obj in file_info['chunks']:
-                        if isinstance(chunk_obj, dict):
-                            all_chunks.append(chunk_obj['content'])
-                            all_metadata.append(chunk_obj['metadata'])
-                        else:
-                            all_chunks.append(chunk_obj)
-                            all_metadata.append({
-                                "source": filename, 
-                                "page": "N/A",
-                                "is_table": "False",
-                                "table_number": "N/A"
-                            })
-                   
-                    progress_bar.progress((idx + 1) / len(available_files))
+                    save_cache(cache_key, file_info)
+                    st.success(f"💾 Cached: {filename}")
                
-                status_text.text("Building search index...")
+                files_data[filename] = file_info
                
-                if all_chunks:
-                    batch_size = 500
-                    for i in range(0, len(all_chunks), batch_size):
-                        batch = all_chunks[i:i+batch_size]
-                        metadata_batch = all_metadata[i:i+batch_size]
-                        collection.add(
-                            documents=batch,
-                            ids=[f"chunk_{i+j}" for j in range(len(batch))],
-                            metadatas=metadata_batch
-                        )
+                # Add chunks with full metadata
+                for chunk_obj in file_info['chunks']:
+                    # Handle both dict and string formats
+                    if isinstance(chunk_obj, dict):
+                        all_chunks.append(chunk_obj['content'])
+                        all_metadata.append(chunk_obj['metadata'])
+                    else:
+                        # Fallback for old cached data
+                        all_chunks.append(chunk_obj)
+                        all_metadata.append({
+                            "source": filename, 
+                            "page": "N/A",
+                            "is_table": "False",
+                            "table_number": "N/A"
+                        })
                
-                st.session_state.files_data = files_data
-                st.session_state.collection = collection
-                st.session_state.processed = True
-                st.session_state.messages = []  # Reset chat
-               
-                status_text.empty()
-                st.success("✅ Processing completed!")
-                st.balloons()
-    else:
-        st.info("✅ Documents already processed. You can chat or clear cache if needed.")
+                progress_bar.progress((idx + 1) / len(available_files))
+           
+            status_text.text("Building search index...")
+           
+            if all_chunks:
+                batch_size = 500
+                for i in range(0, len(all_chunks), batch_size):
+                    batch = all_chunks[i:i+batch_size]
+                    metadata_batch = all_metadata[i:i+batch_size]
+                    collection.add(
+                        documents=batch,
+                        ids=[f"chunk_{i+j}" for j in range(len(batch))],
+                        metadatas=metadata_batch
+                    )
+           
+            st.session_state.files_data = files_data
+            st.session_state.collection = collection
+            st.session_state.processed = True
+            st.session_state.messages = []  # Reset chat
+           
+            status_text.empty()
+            st.success("✅ Processing completed!")
+            st.balloons()
     
-    # Clear chat history button
-    if st.session_state.processed and st.button("🔄 Clear Chat History"):
-        st.session_state.messages = []
-        st.session_state.current_context = []
-        st.rerun()
-    
-    # Clear cache & reprocess
-    if st.session_state.processed and st.button("🗑️ Clear Cache & Reprocess"):
-        import shutil
-        if os.path.exists(CACHE_FOLDER):
-            shutil.rmtree(CACHE_FOLDER)
-            os.makedirs(CACHE_FOLDER)
-        st.session_state.processed = False
-        st.session_state.files_data = {}
-        st.session_state.collection = None
-        st.session_state.messages = []
-        st.success("✅ Cache cleared! Click 'Process Documents' to reprocess.")
-        st.rerun()
+    if st.session_state.processed:
+        st.markdown("---")
+        st.markdown("### 📊 Statistics")
+        total_chunks = sum(len(info['chunks']) for info in st.session_state.files_data.values())
+        total_tables = sum(info['total_tables'] for info in st.session_state.files_data.values())
+        
+        st.metric("Files", len(st.session_state.files_data))
+        st.metric("Chunks", total_chunks)
+        st.metric("Tables", total_tables)
+        
+        st.markdown("---")
+        
+        if st.button("🔄 Clear Chat History"):
+            st.session_state.messages = []
+            st.session_state.current_context = []
+            st.rerun()
+        
+        if st.button("🗑️ Clear Cache & Reprocess"):
+            import shutil
+            if os.path.exists(CACHE_FOLDER):
+                shutil.rmtree(CACHE_FOLDER)
+                os.makedirs(CACHE_FOLDER)
+            st.session_state.processed = False
+            st.session_state.files_data = {}
+            st.session_state.collection = None
+            st.session_state.messages = []
+            st.success("✅ Cache cleared! Click 'Process Documents' to reprocess.")
+            st.rerun()
 
 # Main chat interface
 if st.session_state.processed:
