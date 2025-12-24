@@ -547,27 +547,44 @@ with st.sidebar:
             files_data = {}
             all_chunks = []
             all_metadata = []
-           
-            client = chromadb.Client()
-            collection_name = f"docs_{uuid.uuid4().hex[:8]}"
-            collection = client.create_collection(
-                name=collection_name,
-                embedding_function=get_embedding_function()
-            )
-           
+    
+            # ---------------------------
+            # Persistent ChromaDB Setup
+            # ---------------------------
+            persist_dir = "./chroma_db"
+            collection_name = "mbe_docs"
+            os.makedirs(persist_dir, exist_ok=True)
+    
+            client = chromadb.Client(chromadb.config.Settings(
+                persist_directory=persist_dir
+            ))
+    
+            # استخدم collection موجودة لو موجودة، أو اعمل واحدة جديدة
+            existing_collections = [c.name for c in client.list_collections()]
+            if collection_name in existing_collections:
+                collection = client.get_collection(name=collection_name)
+            else:
+                collection = client.create_collection(
+                    name=collection_name,
+                    embedding_function=get_embedding_function()
+                )
+    
+            # ---------------------------
+            # Processing Files
+            # ---------------------------
             progress_bar = st.progress(0)
             status_text = st.empty()
-           
+    
             for idx, filepath in enumerate(available_files):
                 filename = os.path.basename(filepath)
                 file_ext = filename.split('.')[-1].lower()
-               
+    
                 status_text.text(f"Processing: {filename}...")
-               
+    
                 file_hash = get_file_hash(filepath)
                 cache_key = f"{file_hash}_{file_ext}"
                 cached_data = load_cache(cache_key)
-               
+    
                 if cached_data:
                     st.info(f"📦 Cached: {filename}")
                     file_info = cached_data
@@ -582,19 +599,18 @@ with st.sidebar:
                     else:
                         error = "Unsupported file type"
                         file_info = None
-                   
+    
                     if error:
                         st.error(f"❌ {filename}: {error}")
                         continue
-                   
+    
                     save_cache(cache_key, file_info)
                     st.success(f"💾 Cached: {filename}")
-               
+    
                 files_data[filename] = file_info
-               
+    
                 # Add chunks with full metadata
                 for chunk_obj in file_info['chunks']:
-                    # Handle both dict and string formats
                     if isinstance(chunk_obj, dict):
                         all_chunks.append(chunk_obj['content'])
                         all_metadata.append(chunk_obj['metadata'])
@@ -602,16 +618,19 @@ with st.sidebar:
                         # Fallback for old cached data
                         all_chunks.append(chunk_obj)
                         all_metadata.append({
-                            "source": filename, 
+                            "source": filename,
                             "page": "N/A",
                             "is_table": "False",
                             "table_number": "N/A"
                         })
-               
+    
                 progress_bar.progress((idx + 1) / len(available_files))
-           
+    
             status_text.text("Building search index...")
-           
+    
+            # ---------------------------
+            # Add to ChromaDB and persist
+            # ---------------------------
             if all_chunks:
                 batch_size = 500
                 for i in range(0, len(all_chunks), batch_size):
@@ -622,15 +641,19 @@ with st.sidebar:
                         ids=[f"chunk_{i+j}" for j in range(len(batch))],
                         metadatas=metadata_batch
                     )
-           
+    
+                # Persist the collection to disk
+                collection.client.persist()
+    
             st.session_state.files_data = files_data
             st.session_state.collection = collection
             st.session_state.processed = True
             st.session_state.messages = []  # Reset chat
-           
+    
             status_text.empty()
             st.success("✅ Processing completed!")
             st.balloons()
+
     
     if st.session_state.processed:
         st.markdown("---")
